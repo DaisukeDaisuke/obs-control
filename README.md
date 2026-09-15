@@ -9,6 +9,10 @@ Node.js 22+だけで動作する、OBS Studio / obs-websocket v5向けのstdio M
 - `media_play_range`で`startMs`から`endMs`までの指定区間だけを再生する
 - OBSサウンドミキサーの音量/mute/バランス/同期/モニタリング/トラック割当を取得・変更する
 - Windows OBSのGDI+文字ソースを作成し、文字列・フォント・色・背景・アウトライン・位置/大きさをまとめて操作する
+- ローカル画像と単色矩形を作成し、配置・リサイズ・回転する
+- 既存sourceを別シーンへ再配置し、scene itemの複製・lock・blend modeを操作する
+- OBS標準の安全な映像/音声フィルタだけをallowlist方式で追加・変更する
+- OBSのCPU/メモリ/FPS/skip frameとcanvas/output解像度を読み取って状態診断する
 - シーン/入力/シーンアイテムを作成・列挙・削除・配置・表示切替する
 - OBSのシーンまたは入力をスクリーンショットし、MCPの`image` contentとしてAIへ直接返す
 ## IDの扱い
@@ -38,6 +42,18 @@ OBS_WEBSOCKET_PASSWORD=<OBSで設定したパスワード>
 node C:\Users\owner\Documents\tunnelworkspace\obs\obs-control\server.mjs
 ```
 MCPクライアント側では、このNodeプロセスをstdioサーバーとして登録してください。サーバーはstdoutをMCP JSON-RPC専用に使い、通常ログは出しません。
+
+## 安全境界
+`obs-control`は「安全な編集・観測」を担当します。以下は意図的に実装しません。
+
+- 配信/録画/output/replay buffer/virtual cameraの開始・停止。これらは別MCPへ分離します。
+- Hotkey実行。ユーザー設定次第で配信開始や録画開始など任意の副作用を起こせるためです。
+- Browser Sourceの作成・URL/CSS変更。
+- VST、任意プラグイン、スクリプト、任意shaderなど任意コード実行につながるsource/filter操作。
+
+`input_settings_set`も生のOBS設定を無制限には書きません。既知の安全なbuilt-in input kindと安全な設定キーだけをallowlistし、`browser_source`や未知のplugin input、ファイル/URL/scriptを指定するキーは拒否します。フィルタの変更も同様で、unsafe/third-party filterは`filter_list`/`filter_info`で観測できますが変更できません。
+
+現在変更を許可するfilter kindは `crop_filter`, `color_filter`, `sharpness_filter`, `scale_filter`, `gain_filter`, `compressor_filter`, `limiter_filter`, `noise_gate_filter`, `noise_suppress_filter`, `basic_eq_filter` です。
 ## 動画の追加と配置
 `media_add`に`sceneId`または`sceneName`と`source`を渡します。`sourceMode=auto`では`scheme://`形式をネットワーク入力、それ以外をローカルファイルとして扱います。
 `x`,`y`,`width`,`height`を同時に指定できます。`width`と`height`は必ず対で指定します。
@@ -98,6 +114,24 @@ width: 1000
 height: 180
 fit: contain
 ```
+
+## 画像ソースと単色矩形
+`image_add` / `image_info` / `image_set` / `image_remove` でOBS標準の`image_source`を扱います。`image_add`はローカルファイル専用でURLを拒否し、実際のファイルアクセスはGatewayの許可ディレクトリ制約にも従います。PNG/JPEG/WebP/GIFなどOBSのImage Sourceが対応する形式を利用できます。作成時/更新時に`x`, `y`, `width`, `height`, `fit`, `rotation`を指定できます。
+
+`color_add` / `color_info` / `color_set` / `color_remove` はOBS標準の`color_source`を使います。色は`#RRGGBB`、透明度は0〜100、source自体の`width`/`height`は1〜4096です。`color_source`の最新版をOBSの`GetInputKindList`から自動選択します。テロップ背景、黒帯、半透明パネルなどに使えます。
+
+## Scene Itemの再利用・複製
+`scene_item_add_existing`は既存source UUID/nameを別シーンへ配置します。新しいinputを作らないので、同じ動画・画像・文字を複数シーンから共有できます。`scene_item_duplicate`はtransform/cropを保ったままscene itemを複製し、任意で別シーンをdestinationにできます。
+
+`scene_item_lock_get/set`はOBS UI上のlock状態、`scene_item_blend_get/set`は`normal`, `additive`, `subtract`, `screen`, `multiply`, `lighten`, `darken`を扱います。
+
+## 安全なSource Filter
+`filter_list` / `filter_info`はsource上のfilterを読み取ります。`filter_add` / `filter_set` / `filter_enable` / `filter_remove`は上記allowlistのOBS標準filterだけ変更できます。既存のVSTや第三者filterは情報取得だけ可能で、変更要求はエラーになります。
+
+## OBS状態・整理
+`stats_get`は`GetStats`を使い、CPU使用率、メモリ、render FPS、frame render time、render/output skipped framesなどを返します。`video_settings_get`はcanvas/output解像度とFPSを読み取るだけで、`SetVideoSettings`はこのMCPでは公開しません。
+
+`scene_rename` / `input_rename`で名前変更、`group_list` / `group_item_list`で既存Groupの読み取りができます。OBS WebSocket自身がGroupの利用を非推奨としているため、このMCPはGroup作成を追加せずnested sceneを優先します。
 ## スクリーンショット
 `screenshot`はOBSの`GetSourceScreenshot`を使います。`sourceId`/`sourceName`を省略すると現在のProgramシーンを撮ります。既定はPNG、最大1280x720です。
 返り値にはメタデータ用text contentに加えて、次のMCP image contentが含まれます。
@@ -106,7 +140,9 @@ fit: contain
 ```
 したがってAIは別のファイル読み取りMCPを経由せず、そのツール結果の画像を直接視覚入力として扱えます。画像はPNG/JPEG/WebPの実バイトを検査し、既定8 MiBを超える結果は拒否します。
 ## 実装済みツール
-`obs_status`, `scene_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_item_list`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `input_list`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `audio_mixer_list`, `audio_mixer_get`, `audio_mixer_set`, `audio_mixer_mute_toggle`, `text_add`, `text_info`, `text_set`, `text_remove`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
+全62ツールです。
+
+`obs_status`, `stats_get`, `video_settings_get`, `scene_list`, `group_list`, `group_item_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_rename`, `scene_item_list`, `scene_item_add_existing`, `scene_item_duplicate`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `scene_item_lock_get`, `scene_item_lock_set`, `scene_item_blend_get`, `scene_item_blend_set`, `input_list`, `input_rename`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `audio_mixer_list`, `audio_mixer_get`, `audio_mixer_set`, `audio_mixer_mute_toggle`, `image_add`, `image_info`, `image_set`, `image_remove`, `color_add`, `color_info`, `color_set`, `color_remove`, `text_add`, `text_info`, `text_set`, `text_remove`, `filter_list`, `filter_info`, `filter_add`, `filter_set`, `filter_enable`, `filter_remove`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
 ## 構文確認
 ```text
 node --check server.mjs

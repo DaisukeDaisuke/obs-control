@@ -42,6 +42,22 @@ const TEXT_SELECTOR = {
   textId: { type: 'string', minLength: 1, description: 'Text source ID. This is the OBS input UUID returned by text_add.' },
   textName: { type: 'string', minLength: 1, description: 'OBS text input name.' },
 };
+const IMAGE_SELECTOR = {
+  imageId: { type: 'string', minLength: 1, description: 'Image source ID. This is the OBS input UUID returned by image_add.' },
+  imageName: { type: 'string', minLength: 1, description: 'OBS image input name.' },
+};
+const COLOR_SELECTOR = {
+  colorId: { type: 'string', minLength: 1, description: 'Color source ID. This is the OBS input UUID returned by color_add.' },
+  colorName: { type: 'string', minLength: 1, description: 'OBS color input name.' },
+};
+const SOURCE_SELECTOR = {
+  sourceId: { type: 'string', minLength: 1, description: 'OBS source UUID.' },
+  sourceName: { type: 'string', minLength: 1, description: 'OBS source name.' },
+};
+const GROUP_SELECTOR = {
+  groupId: { type: 'string', minLength: 1, description: 'OBS group UUID.' },
+  groupName: { type: 'string', minLength: 1, description: 'OBS group name.' },
+};
 const TEXT_STYLE_PROPERTIES = {
   text: { type: 'string', description: 'Displayed text. Empty string is allowed.' },
   fontName: { type: 'string', minLength: 1, description: 'Font face/family, for example Arial or Yu Gothic.' },
@@ -71,16 +87,49 @@ const TEXT_PLACEMENT_PROPERTIES = {
   fit: { type: 'string', enum: ['contain', 'cover', 'stretch'], default: 'contain' },
   rotation: { type: 'number', minimum: -360, maximum: 360 },
 };
+const SAFE_FILTER_KINDS = [
+  'crop_filter',
+  'color_filter',
+  'sharpness_filter',
+  'scale_filter',
+  'gain_filter',
+  'compressor_filter',
+  'limiter_filter',
+  'noise_gate_filter',
+  'noise_suppress_filter',
+  'basic_eq_filter',
+];
+const BLEND_MODES = ['normal', 'additive', 'subtract', 'screen', 'multiply', 'lighten', 'darken'];
 
 export const TOOL_SCHEMAS = [
   schema('obs_status', 'OBS status', 'Connect to OBS and return OBS/obs-websocket versions plus active range playbacks.', {}, [], READ_ONLY),
+  schema('stats_get', 'Get OBS stats', 'Get OBS CPU, memory, render FPS, frame timing, skipped-frame counters, and websocket session statistics.', {}, [], READ_ONLY),
+  schema('video_settings_get', 'Get video settings', 'Get OBS canvas/output resolution and FPS. This control MCP intentionally does not expose SetVideoSettings.', {}, [], READ_ONLY),
   schema('scene_list', 'List scenes', 'List OBS scenes and identify the current program/preview scenes.', {}, [], READ_ONLY),
+  schema('group_list', 'List groups', 'List OBS groups. Group creation is intentionally not exposed; nested scenes are preferred.', {}, [], READ_ONLY),
+  schema('group_item_list', 'List group items', 'List every scene item inside an existing OBS group.', GROUP_SELECTOR, [], READ_ONLY),
   schema('scene_create', 'Create scene', 'Create a new OBS scene.', {
     sceneName: { type: 'string', minLength: 1 },
   }, ['sceneName']),
   schema('scene_delete', 'Delete scene', 'Delete an OBS scene by UUID or name.', SCENE_SELECTOR, [], DESTRUCTIVE),
   schema('scene_set_current', 'Set current scene', 'Switch the current program scene by UUID or name.', SCENE_SELECTOR),
+  schema('scene_rename', 'Rename scene', 'Rename an OBS scene by UUID or current name.', {
+    ...SCENE_SELECTOR,
+    newSceneName: { type: 'string', minLength: 1 },
+  }, ['newSceneName']),
   schema('scene_item_list', 'List scene items', 'List every source/item in a scene.', SCENE_SELECTOR, [], READ_ONLY),
+  schema('scene_item_add_existing', 'Place existing source', 'Place an existing OBS source into another scene without creating a new input.', {
+    ...SCENE_SELECTOR,
+    ...SOURCE_SELECTOR,
+    enabled: { type: 'boolean', default: true },
+    ...TEXT_PLACEMENT_PROPERTIES,
+  }),
+  schema('scene_item_duplicate', 'Duplicate scene item', 'Duplicate a scene item, preserving transform/crop. Optionally place the duplicate in another scene.', {
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    destinationSceneId: { type: 'string', minLength: 1 },
+    destinationSceneName: { type: 'string', minLength: 1 },
+  }, ['sceneItemId']),
   schema('scene_item_remove', 'Remove scene item', 'Remove one scene item without deleting the underlying input.', {
     ...SCENE_SELECTOR,
     sceneItemId: { type: 'integer', minimum: 0 },
@@ -115,11 +164,33 @@ export const TOOL_SCHEMAS = [
     sceneItemId: { type: 'integer', minimum: 0 },
     index: { type: 'integer', minimum: 0 },
   }, ['sceneItemId', 'index']),
+  schema('scene_item_lock_get', 'Get scene item lock', 'Get whether a scene item is locked in the OBS UI.', {
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+  }, ['sceneItemId'], READ_ONLY),
+  schema('scene_item_lock_set', 'Set scene item lock', 'Lock or unlock a scene item in the OBS UI.', {
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    locked: { type: 'boolean' },
+  }, ['sceneItemId', 'locked']),
+  schema('scene_item_blend_get', 'Get scene item blend mode', 'Get the compositing blend mode of a scene item.', {
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+  }, ['sceneItemId'], READ_ONLY),
+  schema('scene_item_blend_set', 'Set scene item blend mode', 'Set scene item blend mode: normal, additive, subtract, screen, multiply, lighten, or darken.', {
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    blendMode: { type: 'string', enum: BLEND_MODES },
+  }, ['sceneItemId', 'blendMode']),
   schema('input_list', 'List inputs', 'List OBS inputs, optionally restricted to one input kind.', {
     inputKind: { type: 'string', minLength: 1 },
   }, [], READ_ONLY),
+  schema('input_rename', 'Rename input', 'Rename an OBS input by UUID or current name.', {
+    ...INPUT_SELECTOR,
+    newInputName: { type: 'string', minLength: 1 },
+  }, ['newInputName']),
   schema('input_settings_get', 'Get input settings', 'Get an OBS input kind and its current settings.', INPUT_SELECTOR, [], READ_ONLY),
-  schema('input_settings_set', 'Set input settings', 'Apply settings to an OBS input. overlay=true preserves unspecified settings.', {
+  schema('input_settings_set', 'Set safe raw input settings', 'Apply only allowlisted settings to known-safe built-in input kinds. Browser/unknown/plugin inputs and path/script settings are rejected.', {
     ...INPUT_SELECTOR,
     settings: { type: 'object' },
     overlay: { type: 'boolean', default: true },
@@ -156,6 +227,50 @@ export const TOOL_SCHEMAS = [
     },
   }),
   schema('audio_mixer_mute_toggle', 'Toggle audio mixer mute', 'Toggle mute for one OBS audio input and return its complete mixer state.', INPUT_SELECTOR),
+  schema('image_add', 'Add image', 'Create a local OBS Image Source and place it in a scene. Local file access remains subject to the Gateway path allowlist.', {
+    ...SCENE_SELECTOR,
+    file: { type: 'string', minLength: 1, description: 'Local image file path.' },
+    imageName: { type: 'string', minLength: 1 },
+    unloadWhenNotShowing: { type: 'boolean', default: false },
+    linearAlpha: { type: 'boolean', default: false },
+    ...TEXT_PLACEMENT_PROPERTIES,
+  }, ['file']),
+  schema('image_info', 'Get image info', 'Get Image Source file/settings, active/showing state, and all scene placements.', IMAGE_SELECTOR, [], READ_ONLY),
+  schema('image_set', 'Set image', 'Change an Image Source file/settings and optionally move/resize one scene placement.', {
+    ...IMAGE_SELECTOR,
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    file: { type: 'string', minLength: 1, description: 'Local image file path.' },
+    unloadWhenNotShowing: { type: 'boolean' },
+    linearAlpha: { type: 'boolean' },
+    ...TEXT_PLACEMENT_PROPERTIES,
+  }),
+  schema('image_remove', 'Remove image', 'Delete an Image Source input and all associated scene items.', IMAGE_SELECTOR, [], DESTRUCTIVE),
+  schema('color_add', 'Add color rectangle', 'Create a safe built-in OBS Color Source rectangle with RGB color, opacity, size, position, and rotation.', {
+    ...SCENE_SELECTOR,
+    colorName: { type: 'string', minLength: 1 },
+    color: { type: 'string', pattern: '^#?[0-9A-Fa-f]{6}$' },
+    opacity: { type: 'integer', minimum: 0, maximum: 100, default: 100 },
+    width: { type: 'integer', minimum: 1, maximum: 4096 },
+    height: { type: 'integer', minimum: 1, maximum: 4096 },
+    x: { type: 'number', minimum: -90000, maximum: 90000 },
+    y: { type: 'number', minimum: -90000, maximum: 90000 },
+    rotation: { type: 'number', minimum: -360, maximum: 360 },
+  }, ['color', 'width', 'height']),
+  schema('color_info', 'Get color rectangle info', 'Get Color Source color/opacity/size, active state, and every scene placement.', COLOR_SELECTOR, [], READ_ONLY),
+  schema('color_set', 'Set color rectangle', 'Change Color Source color/opacity/size and optionally move/rotate one scene placement.', {
+    ...COLOR_SELECTOR,
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    color: { type: 'string', pattern: '^#?[0-9A-Fa-f]{6}$' },
+    opacity: { type: 'integer', minimum: 0, maximum: 100 },
+    width: { type: 'integer', minimum: 1, maximum: 4096 },
+    height: { type: 'integer', minimum: 1, maximum: 4096 },
+    x: { type: 'number', minimum: -90000, maximum: 90000 },
+    y: { type: 'number', minimum: -90000, maximum: 90000 },
+    rotation: { type: 'number', minimum: -360, maximum: 360 },
+  }),
+  schema('color_remove', 'Remove color rectangle', 'Delete a Color Source input and all associated scene items.', COLOR_SELECTOR, [], DESTRUCTIVE),
   schema('text_add', 'Add text', 'Create a Windows OBS GDI+ text source and place it in a scene. Text style and scene placement can be specified in the same call.', {
     ...SCENE_SELECTOR,
     textName: { type: 'string', minLength: 1 },
@@ -171,6 +286,32 @@ export const TOOL_SCHEMAS = [
     ...TEXT_PLACEMENT_PROPERTIES,
   }),
   schema('text_remove', 'Remove text', 'Delete a GDI+ text input and all of its associated scene items.', TEXT_SELECTOR, [], DESTRUCTIVE),
+  schema('filter_list', 'List source filters', 'List all filters on a source. Read-only listing includes unsafe/third-party filter kinds for observation, but mutation is restricted to the safe allowlist.', SOURCE_SELECTOR, [], READ_ONLY),
+  schema('filter_info', 'Get source filter', 'Get one source filter and whether its kind is safe for mutation through this MCP.', {
+    ...SOURCE_SELECTOR,
+    filterName: { type: 'string', minLength: 1 },
+  }, ['filterName'], READ_ONLY),
+  schema('filter_add', 'Add safe source filter', 'Add one allowlisted built-in OBS filter. Arbitrary plugin/VST/script/shader filters are rejected.', {
+    ...SOURCE_SELECTOR,
+    filterName: { type: 'string', minLength: 1 },
+    filterKind: { type: 'string', enum: SAFE_FILTER_KINDS },
+    settings: { type: 'object' },
+  }, ['filterName', 'filterKind']),
+  schema('filter_set', 'Set safe source filter', 'Change settings of an existing allowlisted built-in OBS filter.', {
+    ...SOURCE_SELECTOR,
+    filterName: { type: 'string', minLength: 1 },
+    settings: { type: 'object' },
+    overlay: { type: 'boolean', default: true },
+  }, ['filterName', 'settings']),
+  schema('filter_enable', 'Enable safe source filter', 'Enable or disable an existing allowlisted built-in OBS filter.', {
+    ...SOURCE_SELECTOR,
+    filterName: { type: 'string', minLength: 1 },
+    enabled: { type: 'boolean' },
+  }, ['filterName', 'enabled']),
+  schema('filter_remove', 'Remove safe source filter', 'Remove an existing allowlisted built-in OBS filter.', {
+    ...SOURCE_SELECTOR,
+    filterName: { type: 'string', minLength: 1 },
+  }, ['filterName'], DESTRUCTIVE),
   schema('media_list', 'List media', 'List Media Source (ffmpeg_source) inputs. mediaId is the persistent OBS input UUID.', {
     includeSettings: { type: 'boolean', default: false },
   }, [], READ_ONLY),
@@ -360,6 +501,26 @@ const FIT_BOUNDS = {
   cover: 'OBS_BOUNDS_SCALE_OUTER',
   stretch: 'OBS_BOUNDS_STRETCH',
 };
+const BLEND_MODE_TO_OBS = {
+  normal: 'OBS_BLEND_NORMAL',
+  additive: 'OBS_BLEND_ADDITIVE',
+  subtract: 'OBS_BLEND_SUBTRACT',
+  screen: 'OBS_BLEND_SCREEN',
+  multiply: 'OBS_BLEND_MULTIPLY',
+  lighten: 'OBS_BLEND_LIGHTEN',
+  darken: 'OBS_BLEND_DARKEN',
+};
+const OBS_TO_BLEND_MODE = Object.fromEntries(Object.entries(BLEND_MODE_TO_OBS).map(([key, value]) => [value, key]));
+const SAFE_FILTER_KIND_SET = new Set(SAFE_FILTER_KINDS);
+const SAFE_RAW_INPUT_SETTINGS = new Map([
+  ['ffmpeg_source', new Set(['looping', 'restart_on_activate', 'clear_on_media_end', 'speed_percent', 'seekable'])],
+  ['image_source', new Set(['unload', 'linear_alpha'])],
+  ['color_source', new Set(['color', 'width', 'height'])],
+  ['text_gdiplus', new Set([
+    'text', 'font', 'color', 'opacity', 'bk_color', 'bk_opacity', 'outline', 'outline_size',
+    'outline_color', 'outline_opacity', 'align', 'valign', 'antialiasing',
+  ])],
+]);
 const TOP_LEFT_ALIGNMENT = 5; // OBS_ALIGN_LEFT (1) | OBS_ALIGN_TOP (4)
 const OBS_SOURCE_AUDIO_CAP = 1 << 1;
 const MONITOR_TYPES = {
@@ -449,6 +610,13 @@ function plainObject(args, name) {
   return value;
 }
 
+function optionalPlainObject(args, name, fallback = undefined) {
+  const value = args[name];
+  if (value === undefined) return fallback;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} must be an object`);
+  return value;
+}
+
 function selector(args, idKey, nameKey, obsIdKey, obsNameKey, label, { required = true } = {}) {
   const id = optionalString(args, idKey);
   const name = optionalString(args, nameKey);
@@ -468,12 +636,46 @@ function inputSelector(args) {
   return selector(args, 'inputId', 'inputName', 'inputUuid', 'inputName', 'input');
 }
 
+function sourceSelector(args) {
+  return selector(args, 'sourceId', 'sourceName', 'sourceUuid', 'sourceName', 'source');
+}
+
+function groupSelector(args) {
+  return selector(args, 'groupId', 'groupName', 'sceneUuid', 'sceneName', 'group');
+}
+
+function destinationSceneSelector(args) {
+  const id = optionalString(args, 'destinationSceneId');
+  const name = optionalString(args, 'destinationSceneName');
+  if (id && name) throw new Error('Specify only one of destinationSceneId or destinationSceneName');
+  if (id) return { destinationSceneUuid: id };
+  if (name) return { destinationSceneName: name };
+  return {};
+}
+
 async function resolveInputReference(obs, args) {
   const ref = inputSelector(args);
   const data = await obs.call('GetInputList', {});
   const found = (data.inputs ?? []).find((item) => ref.inputUuid ? item.inputUuid === ref.inputUuid : item.inputName === ref.inputName);
   if (!found) throw new Error(`OBS input not found: ${ref.inputUuid ?? ref.inputName}`);
   return { ref: { inputUuid: found.inputUuid }, input: found };
+}
+
+function safeInputKind(input) {
+  return input?.unversionedInputKind ?? input?.inputKind?.replace(/_v\d+$/, '') ?? null;
+}
+
+function validateSafeRawInputSettings(input, settings) {
+  const kind = safeInputKind(input);
+  const allowed = SAFE_RAW_INPUT_SETTINGS.get(kind);
+  if (!allowed) {
+    throw new Error(`Raw input settings are not permitted for input kind ${input?.inputKind ?? 'unknown'}. Use a dedicated safe tool instead.`);
+  }
+  for (const key of Object.keys(settings)) {
+    if (!allowed.has(key)) {
+      throw new Error(`Raw setting ${key} is not permitted for ${kind}. Use a dedicated safe tool instead.`);
+    }
+  }
 }
 
 function mediaSelector(args) {
@@ -493,6 +695,40 @@ async function resolveMediaReference(obs, args) {
 
 function textSelector(args) {
   return selector(args, 'textId', 'textName', 'inputUuid', 'inputName', 'text');
+}
+
+function imageSelector(args) {
+  return selector(args, 'imageId', 'imageName', 'inputUuid', 'inputName', 'image');
+}
+
+function colorSelector(args) {
+  return selector(args, 'colorId', 'colorName', 'inputUuid', 'inputName', 'color');
+}
+
+function isImageInput(input) {
+  return input?.unversionedInputKind === 'image_source' || input?.inputKind === 'image_source';
+}
+
+function isColorInput(input) {
+  return input?.unversionedInputKind === 'color_source' || /^color_source(?:_v\d+)?$/.test(input?.inputKind ?? '');
+}
+
+async function resolveTypedInput(obs, rawRef, predicate, label) {
+  const data = await obs.call('GetInputList', {});
+  const found = (data.inputs ?? []).find((item) => rawRef.inputUuid ? item.inputUuid === rawRef.inputUuid : item.inputName === rawRef.inputName);
+  if (!found) throw new Error(`${label} input not found: ${rawRef.inputUuid ?? rawRef.inputName}`);
+  if (!predicate(found)) throw new Error(`Input is not ${label}: ${rawRef.inputUuid ?? rawRef.inputName}`);
+  return { ref: { inputUuid: found.inputUuid }, input: found };
+}
+
+async function resolveImageReference(obs, args) {
+  const resolved = await resolveTypedInput(obs, imageSelector(args), isImageInput, 'an Image Source');
+  return { ...resolved, imageId: resolved.input.inputUuid, imageName: resolved.input.inputName };
+}
+
+async function resolveColorReference(obs, args) {
+  const resolved = await resolveTypedInput(obs, colorSelector(args), isColorInput, 'a Color Source');
+  return { ...resolved, colorId: resolved.input.inputUuid, colorName: resolved.input.inputName };
 }
 
 function isGdiTextInput(input) {
@@ -522,9 +758,27 @@ async function latestGdiTextInputKind(obs) {
   return kinds[0];
 }
 
+async function latestColorInputKind(obs) {
+  const data = await obs.call('GetInputKindList', {});
+  const kinds = (data.inputKinds ?? []).filter((kind) => /^color_source(?:_v\d+)?$/.test(kind));
+  if (kinds.length === 0) throw new Error('OBS Color Source is unavailable. The image-source plugin must be loaded.');
+  kinds.sort((a, b) => {
+    const av = Number(/^color_source_v(\d+)$/.exec(a)?.[1] ?? 0);
+    const bv = Number(/^color_source_v(\d+)$/.exec(b)?.[1] ?? 0);
+    return bv - av;
+  });
+  return kinds[0];
+}
+
 function textNameFor(text) {
   const compact = text.replace(/[\u0000-\u001f]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 32);
   return `${compact || 'Text'} [${randomUUID().slice(0, 8)}]`;
+}
+
+function inputNameForFile(file, prefix) {
+  const tail = file.split(/[\\/]/).filter(Boolean).at(-1) || prefix;
+  const cleaned = tail.replace(/[\u0000-\u001f]/g, '').slice(0, 48) || prefix;
+  return `${cleaned} [${randomUUID().slice(0, 8)}]`;
 }
 
 function colorArgument(args, name) {
@@ -547,6 +801,28 @@ function colorString(value, fallback) {
   const blue = (bgr >> 16) & 0xFF;
   const rgb = (red << 16) | (green << 8) | blue;
   return `#${rgb.toString(16).padStart(6, '0').toUpperCase()}`;
+}
+
+function colorSourcePacked(args, currentValue = 0xFFFFFFFF, { creating = false } = {}) {
+  const rgb = colorArgument(args, 'color');
+  const opacity = optionalInteger(args, 'opacity');
+  validatePercent(opacity, 'opacity');
+  if (rgb === undefined && opacity === undefined && !creating) return undefined;
+  const current = Number.isFinite(currentValue) ? Number(currentValue) >>> 0 : 0xFFFFFFFF;
+  const low = rgb ?? (current & 0xFFFFFF);
+  const currentAlpha = (current >>> 24) & 0xFF;
+  const alpha = opacity === undefined ? currentAlpha : Math.round(opacity * 255 / 100);
+  return (((alpha & 0xFF) << 24) | low) >>> 0;
+}
+
+function normalizeColorSourceSettings(settings = {}) {
+  const packed = Number.isFinite(settings.color) ? Number(settings.color) >>> 0 : 0xFFFFFFFF;
+  return {
+    color: colorString(packed, 0xFFFFFF),
+    opacity: Math.round(((packed >>> 24) & 0xFF) * 100 / 255),
+    width: settings.width ?? null,
+    height: settings.height ?? null,
+  };
 }
 
 function validatePercent(value, name) {
@@ -673,24 +949,54 @@ async function getSourcePlacements(obs, sourceId) {
   return placements;
 }
 
-async function resolveTextPlacement(obs, textId, args) {
+async function resolveSourcePlacement(obs, sourceId, args, label = 'source') {
   const requestedScene = sceneSelector(args, { required: false });
   const requestedItemId = optionalInteger(args, 'sceneItemId');
   if (requestedItemId !== undefined && requestedItemId < 0) throw new Error('sceneItemId must be >= 0');
   if (requestedScene) {
     const data = await obs.call('GetSceneItemList', requestedScene);
-    let matches = (data.sceneItems ?? []).filter((item) => item.sourceUuid === textId);
+    let matches = (data.sceneItems ?? []).filter((item) => item.sourceUuid === sourceId);
     if (requestedItemId !== undefined) matches = matches.filter((item) => item.sceneItemId === requestedItemId);
-    if (matches.length === 0) throw new Error('The text source is not placed in the specified scene/sceneItemId');
-    if (matches.length > 1) throw new Error('The text source appears multiple times in that scene; specify sceneItemId');
+    if (matches.length === 0) throw new Error(`The ${label} is not placed in the specified scene/sceneItemId`);
+    if (matches.length > 1) throw new Error(`The ${label} appears multiple times in that scene; specify sceneItemId`);
     return { sceneRef: requestedScene, sceneItemId: matches[0].sceneItemId };
   }
-
-  let placements = await getSourcePlacements(obs, textId);
+  let placements = await getSourcePlacements(obs, sourceId);
   if (requestedItemId !== undefined) placements = placements.filter((item) => item.sceneItemId === requestedItemId);
-  if (placements.length === 0) throw new Error('No scene placement was found for this text source');
-  if (placements.length > 1) throw new Error('The text source has multiple scene placements; specify sceneId/sceneName and optionally sceneItemId');
+  if (placements.length === 0) throw new Error(`No scene placement was found for this ${label}`);
+  if (placements.length > 1) throw new Error(`The ${label} has multiple scene placements; specify sceneId/sceneName and optionally sceneItemId`);
   return { sceneRef: { sceneUuid: placements[0].sceneId }, sceneItemId: placements[0].sceneItemId };
+}
+
+async function resolveTextPlacement(obs, textId, args) {
+  return resolveSourcePlacement(obs, textId, args, 'text source');
+}
+
+async function getVisualInputInfo(obs, resolved, normalizer) {
+  const [settingsData, active, placements] = await Promise.all([
+    obs.call('GetInputSettings', resolved.ref),
+    obs.call('GetSourceActive', { sourceUuid: resolved.input.inputUuid }),
+    getSourcePlacements(obs, resolved.input.inputUuid),
+  ]);
+  const settings = settingsData.inputSettings ?? {};
+  return {
+    inputKind: settingsData.inputKind ?? resolved.input.inputKind,
+    ...normalizer(settings),
+    videoActive: active.videoActive,
+    videoShowing: active.videoShowing,
+    placements,
+    settings,
+  };
+}
+
+function assertSafeFilterKind(kind) {
+  if (!SAFE_FILTER_KIND_SET.has(kind)) {
+    throw new Error(`Filter kind ${kind ?? 'unknown'} is not permitted by obs-control. Allowed kinds: ${SAFE_FILTER_KINDS.join(', ')}`);
+  }
+}
+
+async function getFilter(obs, ref, filterName) {
+  return obs.call('GetSourceFilter', { ...ref, filterName });
 }
 
 async function getTextInfo(obs, resolved) {
@@ -905,6 +1211,16 @@ export function createToolHandler({ obs, ranges }) {
         const version = await obs.call('GetVersion');
         return okResult({ url: obs.url, connection, ...version, activeRanges: ranges.list() });
       }
+      case 'stats_get': {
+        return okResult(await obs.call('GetStats'));
+      }
+      case 'video_settings_get': {
+        const data = await obs.call('GetVideoSettings');
+        const fps = Number.isFinite(data.fpsNumerator) && Number.isFinite(data.fpsDenominator) && data.fpsDenominator !== 0
+          ? data.fpsNumerator / data.fpsDenominator
+          : null;
+        return okResult({ ...data, fps });
+      }
       case 'scene_list': {
         const data = await obs.call('GetSceneList');
         return okResult({
@@ -914,6 +1230,15 @@ export function createToolHandler({ obs, ranges }) {
           currentPreviewSceneName: data.currentPreviewSceneName ?? null,
           scenes: (data.scenes ?? []).map(normalizedScene),
         });
+      }
+      case 'group_list': {
+        const data = await obs.call('GetGroupList');
+        return okResult({ groups: data.groups ?? [] });
+      }
+      case 'group_item_list': {
+        const ref = groupSelector(args);
+        const data = await obs.call('GetGroupSceneItemList', ref);
+        return okResult({ ...ref, sceneItems: data.sceneItems ?? [] });
       }
       case 'scene_create': {
         const sceneName = requiredString(args, 'sceneName');
@@ -930,10 +1255,48 @@ export function createToolHandler({ obs, ranges }) {
         await obs.call('SetCurrentProgramScene', ref);
         return okResult({ current: true, ...ref });
       }
+      case 'scene_rename': {
+        const ref = sceneSelector(args);
+        const newSceneName = requiredString(args, 'newSceneName');
+        await obs.call('SetSceneName', { ...ref, newSceneName });
+        return okResult({ renamed: true, ...ref, newSceneName });
+      }
       case 'scene_item_list': {
         const ref = sceneSelector(args);
         const data = await obs.call('GetSceneItemList', ref);
         return okResult({ ...ref, sceneItems: data.sceneItems ?? [] });
+      }
+      case 'scene_item_add_existing': {
+        const sceneRef = sceneSelector(args);
+        const sourceRef = sourceSelector(args);
+        const enabled = optionalBoolean(args, 'enabled', true);
+        const created = await obs.call('CreateSceneItem', {
+          ...sceneRef,
+          ...sourceRef,
+          sceneItemEnabled: enabled,
+        });
+        const placement = buildTransform(args);
+        if (Object.keys(placement).length > 0) {
+          await obs.call('SetSceneItemTransform', {
+            ...sceneRef,
+            sceneItemId: created.sceneItemId,
+            sceneItemTransform: placement,
+          });
+        }
+        const transform = await obs.call('GetSceneItemTransform', { ...sceneRef, sceneItemId: created.sceneItemId });
+        return okResult({ ...sceneRef, ...sourceRef, sceneItemId: created.sceneItemId, enabled, transform: transform.sceneItemTransform });
+      }
+      case 'scene_item_duplicate': {
+        const sceneRef = sceneSelector(args);
+        const sceneItemId = optionalInteger(args, 'sceneItemId');
+        if (sceneItemId === undefined || sceneItemId < 0) throw new Error('sceneItemId must be >= 0');
+        const destination = destinationSceneSelector(args);
+        const duplicated = await obs.call('DuplicateSceneItem', { ...sceneRef, sceneItemId, ...destination });
+        let targetRef = sceneRef;
+        if (destination.destinationSceneUuid) targetRef = { sceneUuid: destination.destinationSceneUuid };
+        else if (destination.destinationSceneName) targetRef = { sceneName: destination.destinationSceneName };
+        const transform = await obs.call('GetSceneItemTransform', { ...targetRef, sceneItemId: duplicated.sceneItemId });
+        return okResult({ sourceSceneItemId: sceneItemId, sceneItemId: duplicated.sceneItemId, ...targetRef, transform: transform.sceneItemTransform });
       }
       case 'scene_item_remove': {
         const ref = sceneSelector(args);
@@ -977,10 +1340,52 @@ export function createToolHandler({ obs, ranges }) {
         await obs.call('SetSceneItemIndex', { ...ref, sceneItemId, sceneItemIndex: index });
         return okResult({ sceneItemId, index, ...ref });
       }
+      case 'scene_item_lock_get': {
+        const ref = sceneSelector(args);
+        const sceneItemId = optionalInteger(args, 'sceneItemId');
+        if (sceneItemId === undefined || sceneItemId < 0) throw new Error('sceneItemId must be >= 0');
+        const data = await obs.call('GetSceneItemLocked', { ...ref, sceneItemId });
+        return okResult({ ...ref, sceneItemId, locked: data.sceneItemLocked });
+      }
+      case 'scene_item_lock_set': {
+        const ref = sceneSelector(args);
+        const sceneItemId = optionalInteger(args, 'sceneItemId');
+        const locked = optionalBoolean(args, 'locked');
+        if (sceneItemId === undefined || sceneItemId < 0) throw new Error('sceneItemId must be >= 0');
+        if (locked === undefined) throw new Error('locked is required');
+        await obs.call('SetSceneItemLocked', { ...ref, sceneItemId, sceneItemLocked: locked });
+        return okResult({ ...ref, sceneItemId, locked });
+      }
+      case 'scene_item_blend_get': {
+        const ref = sceneSelector(args);
+        const sceneItemId = optionalInteger(args, 'sceneItemId');
+        if (sceneItemId === undefined || sceneItemId < 0) throw new Error('sceneItemId must be >= 0');
+        const data = await obs.call('GetSceneItemBlendMode', { ...ref, sceneItemId });
+        return okResult({
+          ...ref,
+          sceneItemId,
+          blendMode: OBS_TO_BLEND_MODE[data.sceneItemBlendMode] ?? data.sceneItemBlendMode,
+          obsBlendMode: data.sceneItemBlendMode,
+        });
+      }
+      case 'scene_item_blend_set': {
+        const ref = sceneSelector(args);
+        const sceneItemId = optionalInteger(args, 'sceneItemId');
+        const blendMode = enumValue(args, 'blendMode', BLEND_MODES);
+        if (sceneItemId === undefined || sceneItemId < 0) throw new Error('sceneItemId must be >= 0');
+        await obs.call('SetSceneItemBlendMode', { ...ref, sceneItemId, sceneItemBlendMode: BLEND_MODE_TO_OBS[blendMode] });
+        return okResult({ ...ref, sceneItemId, blendMode, obsBlendMode: BLEND_MODE_TO_OBS[blendMode] });
+      }
       case 'input_list': {
         const inputKind = optionalString(args, 'inputKind');
         const data = await obs.call('GetInputList', inputKind ? { inputKind } : {});
         return okResult({ inputs: (data.inputs ?? []).map(normalizedInput) });
+      }
+      case 'input_rename': {
+        const resolved = await resolveInputReference(obs, args);
+        const newInputName = requiredString(args, 'newInputName');
+        await obs.call('SetInputName', { ...resolved.ref, newInputName });
+        return okResult({ inputId: resolved.input.inputUuid, oldInputName: resolved.input.inputName, inputName: newInputName });
       }
       case 'input_settings_get': {
         const ref = inputSelector(args);
@@ -988,12 +1393,13 @@ export function createToolHandler({ obs, ranges }) {
         return okResult({ ...ref, inputKind: data.inputKind, settings: data.inputSettings });
       }
       case 'input_settings_set': {
-        const ref = inputSelector(args);
+        const resolved = await resolveInputReference(obs, args);
         const settings = plainObject(args, 'settings');
         const overlay = optionalBoolean(args, 'overlay', true);
-        await obs.call('SetInputSettings', { ...ref, inputSettings: settings, overlay });
-        const data = await obs.call('GetInputSettings', ref);
-        return okResult({ ...ref, inputKind: data.inputKind, settings: data.inputSettings });
+        validateSafeRawInputSettings(resolved.input, settings);
+        await obs.call('SetInputSettings', { ...resolved.ref, inputSettings: settings, overlay });
+        const data = await obs.call('GetInputSettings', resolved.ref);
+        return okResult({ inputId: resolved.input.inputUuid, inputName: resolved.input.inputName, inputKind: data.inputKind, settings: data.inputSettings });
       }
       case 'input_audio_get': {
         const ref = inputSelector(args);
@@ -1068,6 +1474,179 @@ export function createToolHandler({ obs, ranges }) {
         await obs.call('ToggleInputMute', resolved.ref);
         return okResult(await getAudioMixerState(obs, resolved.ref, resolved.input));
       }
+      case 'image_add': {
+        const sceneRef = sceneSelector(args);
+        const file = requiredString(args, 'file');
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(file)) throw new Error('image_add only accepts local files, not URLs');
+        const imageName = optionalString(args, 'imageName') ?? inputNameForFile(file, 'Image');
+        const unloadWhenNotShowing = optionalBoolean(args, 'unloadWhenNotShowing', false);
+        const linearAlpha = optionalBoolean(args, 'linearAlpha', false);
+        const created = await obs.call('CreateInput', {
+          ...sceneRef,
+          inputName: imageName,
+          inputKind: 'image_source',
+          inputSettings: { file, unload: unloadWhenNotShowing, linear_alpha: linearAlpha },
+          sceneItemEnabled: true,
+        });
+        const placement = buildTransform(args);
+        if (Object.keys(placement).length > 0) {
+          await obs.call('SetSceneItemTransform', {
+            ...sceneRef,
+            sceneItemId: created.sceneItemId,
+            sceneItemTransform: placement,
+          });
+        }
+        const transform = await obs.call('GetSceneItemTransform', { ...sceneRef, sceneItemId: created.sceneItemId });
+        return okResult({
+          imageId: created.inputUuid,
+          imageName,
+          sceneItemId: created.sceneItemId,
+          file,
+          unloadWhenNotShowing,
+          linearAlpha,
+          transform: transform.sceneItemTransform,
+        });
+      }
+      case 'image_info': {
+        const resolved = await resolveImageReference(obs, args);
+        const info = await getVisualInputInfo(obs, resolved, (settings) => ({
+          file: settings.file ?? null,
+          unloadWhenNotShowing: settings.unload ?? false,
+          linearAlpha: settings.linear_alpha ?? false,
+        }));
+        return okResult({ imageId: resolved.imageId, imageName: resolved.imageName, ...info });
+      }
+      case 'image_set': {
+        const resolved = await resolveImageReference(obs, args);
+        const file = optionalString(args, 'file');
+        if (file && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(file)) throw new Error('image_set only accepts local files, not URLs');
+        const unloadWhenNotShowing = optionalBoolean(args, 'unloadWhenNotShowing');
+        const linearAlpha = optionalBoolean(args, 'linearAlpha');
+        const settings = {};
+        if (file !== undefined) settings.file = file;
+        if (unloadWhenNotShowing !== undefined) settings.unload = unloadWhenNotShowing;
+        if (linearAlpha !== undefined) settings.linear_alpha = linearAlpha;
+        const placement = buildTransform(args);
+        if (Object.keys(settings).length === 0 && Object.keys(placement).length === 0) {
+          throw new Error('Provide at least one image setting or placement property to change');
+        }
+        if (Object.keys(settings).length > 0) {
+          await obs.call('SetInputSettings', { ...resolved.ref, inputSettings: settings, overlay: true });
+        }
+        if (Object.keys(placement).length > 0) {
+          const target = await resolveSourcePlacement(obs, resolved.imageId, args, 'image source');
+          await obs.call('SetSceneItemTransform', {
+            ...target.sceneRef,
+            sceneItemId: target.sceneItemId,
+            sceneItemTransform: placement,
+          });
+        }
+        const info = await getVisualInputInfo(obs, resolved, (current) => ({
+          file: current.file ?? null,
+          unloadWhenNotShowing: current.unload ?? false,
+          linearAlpha: current.linear_alpha ?? false,
+        }));
+        return okResult({ imageId: resolved.imageId, imageName: resolved.imageName, ...info });
+      }
+      case 'image_remove': {
+        const resolved = await resolveImageReference(obs, args);
+        await obs.call('RemoveInput', resolved.ref);
+        return okResult({ removed: true, imageId: resolved.imageId, imageName: resolved.imageName });
+      }
+      case 'color_add': {
+        const sceneRef = sceneSelector(args);
+        const userColor = requiredString(args, 'color');
+        const width = optionalInteger(args, 'width');
+        const height = optionalInteger(args, 'height');
+        const opacity = optionalInteger(args, 'opacity', 100);
+        if (width === undefined || width < 1 || width > 4096) throw new Error('width must be from 1 through 4096');
+        if (height === undefined || height < 1 || height > 4096) throw new Error('height must be from 1 through 4096');
+        validatePercent(opacity, 'opacity');
+        const colorName = optionalString(args, 'colorName') ?? `Color ${userColor} [${randomUUID().slice(0, 8)}]`;
+        const inputKind = await latestColorInputKind(obs);
+        const packed = colorSourcePacked({ color: userColor, opacity }, 0xFFFFFFFF, { creating: true });
+        const created = await obs.call('CreateInput', {
+          ...sceneRef,
+          inputName: colorName,
+          inputKind,
+          inputSettings: { color: packed, width, height },
+          sceneItemEnabled: true,
+        });
+        const sceneItemTransform = {};
+        const x = optionalNumber(args, 'x');
+        const y = optionalNumber(args, 'y');
+        const rotation = optionalNumber(args, 'rotation');
+        if (x !== undefined) sceneItemTransform.positionX = x;
+        if (y !== undefined) sceneItemTransform.positionY = y;
+        if (rotation !== undefined) sceneItemTransform.rotation = rotation;
+        if (Object.keys(sceneItemTransform).length > 0) {
+          sceneItemTransform.alignment = TOP_LEFT_ALIGNMENT;
+          await obs.call('SetSceneItemTransform', { ...sceneRef, sceneItemId: created.sceneItemId, sceneItemTransform });
+        }
+        const transform = await obs.call('GetSceneItemTransform', { ...sceneRef, sceneItemId: created.sceneItemId });
+        return okResult({
+          colorId: created.inputUuid,
+          colorName,
+          inputKind,
+          sceneItemId: created.sceneItemId,
+          color: userColor.startsWith('#') ? userColor.toUpperCase() : `#${userColor.toUpperCase()}`,
+          opacity,
+          width,
+          height,
+          transform: transform.sceneItemTransform,
+        });
+      }
+      case 'color_info': {
+        const resolved = await resolveColorReference(obs, args);
+        const info = await getVisualInputInfo(obs, resolved, normalizeColorSourceSettings);
+        return okResult({ colorId: resolved.colorId, colorName: resolved.colorName, ...info });
+      }
+      case 'color_set': {
+        const resolved = await resolveColorReference(obs, args);
+        const current = await obs.call('GetInputSettings', resolved.ref);
+        const settings = {};
+        const packed = colorSourcePacked(args, current.inputSettings?.color);
+        if (packed !== undefined) settings.color = packed;
+        const width = optionalInteger(args, 'width');
+        const height = optionalInteger(args, 'height');
+        if (width !== undefined) {
+          if (width < 1 || width > 4096) throw new Error('width must be from 1 through 4096');
+          settings.width = width;
+        }
+        if (height !== undefined) {
+          if (height < 1 || height > 4096) throw new Error('height must be from 1 through 4096');
+          settings.height = height;
+        }
+        const sceneItemTransform = {};
+        const x = optionalNumber(args, 'x');
+        const y = optionalNumber(args, 'y');
+        const rotation = optionalNumber(args, 'rotation');
+        if (x !== undefined) sceneItemTransform.positionX = x;
+        if (y !== undefined) sceneItemTransform.positionY = y;
+        if (rotation !== undefined) sceneItemTransform.rotation = rotation;
+        if (Object.keys(settings).length === 0 && Object.keys(sceneItemTransform).length === 0) {
+          throw new Error('Provide at least one color/size or placement property to change');
+        }
+        if (Object.keys(settings).length > 0) {
+          await obs.call('SetInputSettings', { ...resolved.ref, inputSettings: settings, overlay: true });
+        }
+        if (Object.keys(sceneItemTransform).length > 0) {
+          const target = await resolveSourcePlacement(obs, resolved.colorId, args, 'color source');
+          sceneItemTransform.alignment = TOP_LEFT_ALIGNMENT;
+          await obs.call('SetSceneItemTransform', {
+            ...target.sceneRef,
+            sceneItemId: target.sceneItemId,
+            sceneItemTransform,
+          });
+        }
+        const info = await getVisualInputInfo(obs, resolved, normalizeColorSourceSettings);
+        return okResult({ colorId: resolved.colorId, colorName: resolved.colorName, ...info });
+      }
+      case 'color_remove': {
+        const resolved = await resolveColorReference(obs, args);
+        await obs.call('RemoveInput', resolved.ref);
+        return okResult({ removed: true, colorId: resolved.colorId, colorName: resolved.colorName });
+      }
       case 'text_add': {
         const sceneRef = sceneSelector(args);
         const text = optionalText(args, 'text');
@@ -1133,6 +1712,63 @@ export function createToolHandler({ obs, ranges }) {
         const resolved = await resolveTextReference(obs, args);
         await obs.call('RemoveInput', resolved.ref);
         return okResult({ removed: true, textId: resolved.textId, textName: resolved.textName });
+      }
+      case 'filter_list': {
+        const ref = sourceSelector(args);
+        const data = await obs.call('GetSourceFilterList', ref);
+        return okResult({
+          ...ref,
+          filters: (data.filters ?? []).map((filter) => ({
+            ...filter,
+            safeForMutation: SAFE_FILTER_KIND_SET.has(filter.filterKind),
+          })),
+        });
+      }
+      case 'filter_info': {
+        const ref = sourceSelector(args);
+        const filterName = requiredString(args, 'filterName');
+        const data = await getFilter(obs, ref, filterName);
+        return okResult({ ...ref, filterName, ...data, safeForMutation: SAFE_FILTER_KIND_SET.has(data.filterKind) });
+      }
+      case 'filter_add': {
+        const ref = sourceSelector(args);
+        const filterName = requiredString(args, 'filterName');
+        const filterKind = requiredString(args, 'filterKind');
+        assertSafeFilterKind(filterKind);
+        const settings = optionalPlainObject(args, 'settings', {});
+        await obs.call('CreateSourceFilter', { ...ref, filterName, filterKind, filterSettings: settings });
+        const data = await getFilter(obs, ref, filterName);
+        return okResult({ ...ref, filterName, ...data, safeForMutation: true });
+      }
+      case 'filter_set': {
+        const ref = sourceSelector(args);
+        const filterName = requiredString(args, 'filterName');
+        const settings = plainObject(args, 'settings');
+        const overlay = optionalBoolean(args, 'overlay', true);
+        const before = await getFilter(obs, ref, filterName);
+        assertSafeFilterKind(before.filterKind);
+        await obs.call('SetSourceFilterSettings', { ...ref, filterName, filterSettings: settings, overlay });
+        const data = await getFilter(obs, ref, filterName);
+        return okResult({ ...ref, filterName, ...data, safeForMutation: true });
+      }
+      case 'filter_enable': {
+        const ref = sourceSelector(args);
+        const filterName = requiredString(args, 'filterName');
+        const enabled = optionalBoolean(args, 'enabled');
+        if (enabled === undefined) throw new Error('enabled is required');
+        const before = await getFilter(obs, ref, filterName);
+        assertSafeFilterKind(before.filterKind);
+        await obs.call('SetSourceFilterEnabled', { ...ref, filterName, filterEnabled: enabled });
+        const data = await getFilter(obs, ref, filterName);
+        return okResult({ ...ref, filterName, ...data, safeForMutation: true });
+      }
+      case 'filter_remove': {
+        const ref = sourceSelector(args);
+        const filterName = requiredString(args, 'filterName');
+        const before = await getFilter(obs, ref, filterName);
+        assertSafeFilterKind(before.filterKind);
+        await obs.call('RemoveSourceFilter', { ...ref, filterName });
+        return okResult({ removed: true, ...ref, filterName, filterKind: before.filterKind });
       }
       case 'media_list': {
         const includeSettings = optionalBoolean(args, 'includeSettings', false);

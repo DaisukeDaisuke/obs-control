@@ -280,7 +280,17 @@ assert.equal(initialized.result.serverInfo.name, 'obs-control');
 
 const listed = await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
 const names = new Set(listed.result.tools.map((tool) => tool.name));
-for (const requiredTool of ['media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot', 'audio_mixer_list', 'audio_mixer_get', 'audio_mixer_set', 'audio_mixer_mute_toggle', 'text_add', 'text_info', 'text_set', 'text_remove']) {
+for (const requiredTool of [
+  'media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot',
+  'audio_mixer_list', 'audio_mixer_get', 'audio_mixer_set', 'audio_mixer_mute_toggle',
+  'text_add', 'text_info', 'text_set', 'text_remove',
+  'stats_get', 'video_settings_get', 'group_list', 'group_item_list', 'scene_rename',
+  'scene_item_add_existing', 'scene_item_duplicate', 'scene_item_lock_get', 'scene_item_lock_set',
+  'scene_item_blend_get', 'scene_item_blend_set', 'input_rename',
+  'image_add', 'image_info', 'image_set', 'image_remove',
+  'color_add', 'color_info', 'color_set', 'color_remove',
+  'filter_list', 'filter_info', 'filter_add', 'filter_set', 'filter_enable', 'filter_remove',
+]) {
   assert(names.has(requiredTool), `missing tool ${requiredTool}`);
 }
 
@@ -601,6 +611,258 @@ assert.equal(screenshot.result.content[1].mimeType, 'image/png');
 assert.equal(screenshot.result.structuredContent.result.width, 1);
 assert.equal(screenshot.result.structuredContent.result.height, 1);
 
+class FeatureFakeObs {
+  url = 'ws://feature-fake:4455';
+  calls = [];
+  inputs = [
+    { inputName: 'base-image', inputUuid: 'image-base', inputKind: 'image_source', unversionedInputKind: 'image_source', inputKindCaps: 1 },
+    { inputName: 'base-color', inputUuid: 'color-base', inputKind: 'color_source_v3', unversionedInputKind: 'color_source', inputKindCaps: 1 },
+    { inputName: 'unsafe-browser', inputUuid: 'browser-1', inputKind: 'browser_source', unversionedInputKind: 'browser_source', inputKindCaps: 1 },
+    { inputName: 'safe-media', inputUuid: 'media-safe-1', inputKind: 'ffmpeg_source', unversionedInputKind: 'ffmpeg_source', inputKindCaps: 3 },
+  ];
+  settings = new Map([
+    ['image-base', { file: 'C:\\allowed\\base.png', unload: false, linear_alpha: false }],
+    ['color-base', { color: 0xFF332211, width: 400, height: 200 }],
+    ['browser-1', { url: 'https://example.invalid', width: 800, height: 600 }],
+    ['media-safe-1', { is_local_file: true, local_file: 'C:\\allowed\\clip.mp4', looping: false, speed_percent: 100 }],
+  ]);
+  transforms = new Map([
+    [31, { sourceWidth: 640, sourceHeight: 360, positionX: 0, positionY: 0, width: 640, height: 360, rotation: 0 }],
+    [34, { sourceWidth: 400, sourceHeight: 200, positionX: 20, positionY: 30, width: 400, height: 200, rotation: 0 }],
+  ]);
+  locked = new Map([[31, false]]);
+  blend = new Map([[31, 'OBS_BLEND_NORMAL']]);
+  filters = new Map([
+    ['safe-existing', { filterEnabled: true, filterIndex: 0, filterKind: 'color_filter', filterSettings: { opacity: 1 } }],
+    ['unsafe-vst', { filterEnabled: true, filterIndex: 1, filterKind: 'vst_filter', filterSettings: { plugin_path: 'unsafe.dll' } }],
+  ]);
+
+  async connect() {
+    return { obsStudioVersion: '99.0.0-feature', obsWebSocketVersion: '5.7.4-feature', serverRpcVersion: 1, negotiatedRpcVersion: 1 };
+  }
+
+  async disconnect() {}
+
+  async call(requestType, requestData = {}) {
+    this.calls.push({ requestType, requestData });
+    switch (requestType) {
+      case 'GetStats':
+        return { cpuUsage: 3.5, memoryUsage: 512, availableDiskSpace: 100000, activeFps: 60, averageFrameRenderTime: 2.1, renderSkippedFrames: 1, renderTotalFrames: 1000, outputSkippedFrames: 0, outputTotalFrames: 1000 };
+      case 'GetVideoSettings':
+        return { fpsNumerator: 60000, fpsDenominator: 1001, baseWidth: 1920, baseHeight: 1080, outputWidth: 1280, outputHeight: 720 };
+      case 'GetGroupList':
+        return { groups: ['Legacy Group'] };
+      case 'GetGroupSceneItemList':
+        return { sceneItems: [{ sceneItemId: 90, sourceName: 'group-child', sourceUuid: 'group-child-1' }] };
+      case 'SetSceneName':
+        return {};
+      case 'GetInputList':
+        return { inputs: requestData.inputKind ? this.inputs.filter((input) => input.inputKind === requestData.inputKind) : this.inputs };
+      case 'GetInputKindList':
+        return { inputKinds: ['ffmpeg_source', 'image_source', 'color_source', 'color_source_v2', 'color_source_v3', 'text_gdiplus_v3', 'browser_source'] };
+      case 'SetInputName': {
+        const input = this.inputs.find((item) => requestData.inputUuid ? item.inputUuid === requestData.inputUuid : item.inputName === requestData.inputName);
+        if (!input) throw new Error('input not found');
+        input.inputName = requestData.newInputName;
+        return {};
+      }
+      case 'GetInputSettings': {
+        const input = this.inputs.find((item) => requestData.inputUuid ? item.inputUuid === requestData.inputUuid : item.inputName === requestData.inputName);
+        if (!input) throw new Error('input not found');
+        return { inputKind: input.inputKind, inputSettings: this.settings.get(input.inputUuid) ?? {} };
+      }
+      case 'SetInputSettings': {
+        const input = this.inputs.find((item) => requestData.inputUuid ? item.inputUuid === requestData.inputUuid : item.inputName === requestData.inputName);
+        if (!input) throw new Error('input not found');
+        const previous = requestData.overlay === false ? {} : (this.settings.get(input.inputUuid) ?? {});
+        this.settings.set(input.inputUuid, { ...previous, ...(requestData.inputSettings ?? {}) });
+        return {};
+      }
+      case 'CreateInput': {
+        if (requestData.inputKind === 'image_source') {
+          this.inputs.push({ inputName: requestData.inputName, inputUuid: 'image-created', inputKind: 'image_source', unversionedInputKind: 'image_source', inputKindCaps: 1 });
+          this.settings.set('image-created', { ...requestData.inputSettings });
+          this.transforms.set(32, { sourceWidth: 320, sourceHeight: 180, positionX: 0, positionY: 0, width: 320, height: 180, rotation: 0 });
+          return { inputUuid: 'image-created', sceneItemId: 32 };
+        }
+        if (/^color_source/.test(requestData.inputKind)) {
+          this.inputs.push({ inputName: requestData.inputName, inputUuid: 'color-created', inputKind: requestData.inputKind, unversionedInputKind: 'color_source', inputKindCaps: 1 });
+          this.settings.set('color-created', { ...requestData.inputSettings });
+          this.transforms.set(33, { sourceWidth: requestData.inputSettings.width, sourceHeight: requestData.inputSettings.height, positionX: 0, positionY: 0, width: requestData.inputSettings.width, height: requestData.inputSettings.height, rotation: 0 });
+          return { inputUuid: 'color-created', sceneItemId: 33 };
+        }
+        throw new Error(`Unexpected CreateInput kind ${requestData.inputKind}`);
+      }
+      case 'RemoveInput': {
+        const index = this.inputs.findIndex((item) => item.inputUuid === requestData.inputUuid || item.inputName === requestData.inputName);
+        if (index >= 0) {
+          const [removed] = this.inputs.splice(index, 1);
+          this.settings.delete(removed.inputUuid);
+        }
+        return {};
+      }
+      case 'GetSourceActive':
+        return { videoActive: true, videoShowing: true };
+      case 'GetSceneList':
+        return { currentProgramSceneName: 'Main', currentProgramSceneUuid: 'scene-1', currentPreviewSceneName: null, currentPreviewSceneUuid: null, scenes: [{ sceneName: 'Main', sceneUuid: 'scene-1', sceneIndex: 0 }] };
+      case 'GetSceneItemList': {
+        const sceneItems = [
+          { sceneItemId: 31, sceneItemIndex: 0, sceneItemEnabled: true, sceneItemLocked: this.locked.get(31) ?? false, sourceName: this.inputs.find((i) => i.inputUuid === 'image-base')?.inputName ?? 'base-image', sourceUuid: 'image-base', inputKind: 'image_source', sceneItemTransform: this.transforms.get(31) },
+          { sceneItemId: 34, sceneItemIndex: 1, sceneItemEnabled: true, sceneItemLocked: false, sourceName: 'base-color', sourceUuid: 'color-base', inputKind: 'color_source_v3', sceneItemTransform: this.transforms.get(34) },
+        ];
+        if (this.inputs.some((i) => i.inputUuid === 'image-created')) sceneItems.push({ sceneItemId: 32, sceneItemIndex: 2, sceneItemEnabled: true, sceneItemLocked: false, sourceName: 'created-image', sourceUuid: 'image-created', inputKind: 'image_source', sceneItemTransform: this.transforms.get(32) });
+        if (this.inputs.some((i) => i.inputUuid === 'color-created')) sceneItems.push({ sceneItemId: 33, sceneItemIndex: 3, sceneItemEnabled: true, sceneItemLocked: false, sourceName: 'created-color', sourceUuid: 'color-created', inputKind: 'color_source_v3', sceneItemTransform: this.transforms.get(33) });
+        return { sceneItems };
+      }
+      case 'CreateSceneItem':
+        this.transforms.set(40, { sourceWidth: 640, sourceHeight: 360, positionX: 0, positionY: 0, width: 640, height: 360, rotation: 0 });
+        return { sceneItemId: 40 };
+      case 'DuplicateSceneItem':
+        this.transforms.set(41, { ...(this.transforms.get(requestData.sceneItemId) ?? {}), positionX: 15 });
+        return { sceneItemId: 41 };
+      case 'GetSceneItemTransform':
+        return { sceneItemTransform: this.transforms.get(requestData.sceneItemId) ?? { sourceWidth: 640, sourceHeight: 360, positionX: 0, positionY: 0, width: 640, height: 360, rotation: 0 } };
+      case 'SetSceneItemTransform':
+        this.transforms.set(requestData.sceneItemId, { ...(this.transforms.get(requestData.sceneItemId) ?? {}), ...(requestData.sceneItemTransform ?? {}) });
+        return {};
+      case 'GetSceneItemLocked':
+        return { sceneItemLocked: this.locked.get(requestData.sceneItemId) ?? false };
+      case 'SetSceneItemLocked':
+        this.locked.set(requestData.sceneItemId, requestData.sceneItemLocked);
+        return {};
+      case 'GetSceneItemBlendMode':
+        return { sceneItemBlendMode: this.blend.get(requestData.sceneItemId) ?? 'OBS_BLEND_NORMAL' };
+      case 'SetSceneItemBlendMode':
+        this.blend.set(requestData.sceneItemId, requestData.sceneItemBlendMode);
+        return {};
+      case 'GetSourceFilterList':
+        return { filters: [...this.filters.entries()].map(([filterName, data]) => ({ filterName, ...data })) };
+      case 'GetSourceFilter': {
+        const filter = this.filters.get(requestData.filterName);
+        if (!filter) throw new Error('filter not found');
+        return { ...filter };
+      }
+      case 'CreateSourceFilter':
+        this.filters.set(requestData.filterName, { filterEnabled: true, filterIndex: this.filters.size, filterKind: requestData.filterKind, filterSettings: { ...(requestData.filterSettings ?? {}) } });
+        return {};
+      case 'SetSourceFilterSettings': {
+        const filter = this.filters.get(requestData.filterName);
+        if (!filter) throw new Error('filter not found');
+        filter.filterSettings = requestData.overlay === false ? { ...(requestData.filterSettings ?? {}) } : { ...filter.filterSettings, ...(requestData.filterSettings ?? {}) };
+        return {};
+      }
+      case 'SetSourceFilterEnabled': {
+        const filter = this.filters.get(requestData.filterName);
+        if (!filter) throw new Error('filter not found');
+        filter.filterEnabled = requestData.filterEnabled;
+        return {};
+      }
+      case 'RemoveSourceFilter':
+        this.filters.delete(requestData.filterName);
+        return {};
+      default:
+        throw new Error(`FeatureFakeObs has no response for ${requestType}`);
+    }
+  }
+}
+
+const featureFake = new FeatureFakeObs();
+const featureServer = createServer({ obs: featureFake });
+await featureServer.handle({ jsonrpc: '2.0', id: 600, method: 'initialize', params: { protocolVersion: '2026-07-28' } });
+
+const stats = await featureServer.handle({ jsonrpc: '2.0', id: 601, method: 'tools/call', params: { name: 'stats_get', arguments: {} } });
+assert.equal(stats.result.structuredContent.result.activeFps, 60);
+const videoSettings = await featureServer.handle({ jsonrpc: '2.0', id: 602, method: 'tools/call', params: { name: 'video_settings_get', arguments: {} } });
+assert(Math.abs(videoSettings.result.structuredContent.result.fps - 59.94005994) < 0.0001);
+const groups = await featureServer.handle({ jsonrpc: '2.0', id: 603, method: 'tools/call', params: { name: 'group_list', arguments: {} } });
+assert.deepEqual(groups.result.structuredContent.result.groups, ['Legacy Group']);
+const groupItems = await featureServer.handle({ jsonrpc: '2.0', id: 604, method: 'tools/call', params: { name: 'group_item_list', arguments: { groupName: 'Legacy Group' } } });
+assert.equal(groupItems.result.structuredContent.result.sceneItems[0].sceneItemId, 90);
+
+featureFake.calls.length = 0;
+const sceneRenamed = await featureServer.handle({ jsonrpc: '2.0', id: 605, method: 'tools/call', params: { name: 'scene_rename', arguments: { sceneId: 'scene-1', newSceneName: 'Renamed Main' } } });
+assert.equal(sceneRenamed.result.isError, false);
+assert(featureFake.calls.some((entry) => entry.requestType === 'SetSceneName' && entry.requestData.newSceneName === 'Renamed Main'));
+
+const inputRenamed = await featureServer.handle({ jsonrpc: '2.0', id: 606, method: 'tools/call', params: { name: 'input_rename', arguments: { inputId: 'image-base', newInputName: 'renamed-image' } } });
+assert.equal(inputRenamed.result.structuredContent.result.inputName, 'renamed-image');
+
+const placedExisting = await featureServer.handle({
+  jsonrpc: '2.0', id: 607, method: 'tools/call',
+  params: { name: 'scene_item_add_existing', arguments: { sceneId: 'scene-1', sourceId: 'image-base', x: 10, y: 20, width: 300, height: 200 } },
+});
+assert.equal(placedExisting.result.structuredContent.result.sceneItemId, 40);
+const duplicated = await featureServer.handle({ jsonrpc: '2.0', id: 608, method: 'tools/call', params: { name: 'scene_item_duplicate', arguments: { sceneId: 'scene-1', sceneItemId: 31 } } });
+assert.equal(duplicated.result.structuredContent.result.sceneItemId, 41);
+await featureServer.handle({ jsonrpc: '2.0', id: 609, method: 'tools/call', params: { name: 'scene_item_lock_set', arguments: { sceneId: 'scene-1', sceneItemId: 31, locked: true } } });
+const lockInfo = await featureServer.handle({ jsonrpc: '2.0', id: 610, method: 'tools/call', params: { name: 'scene_item_lock_get', arguments: { sceneId: 'scene-1', sceneItemId: 31 } } });
+assert.equal(lockInfo.result.structuredContent.result.locked, true);
+await featureServer.handle({ jsonrpc: '2.0', id: 611, method: 'tools/call', params: { name: 'scene_item_blend_set', arguments: { sceneId: 'scene-1', sceneItemId: 31, blendMode: 'multiply' } } });
+const blendInfo = await featureServer.handle({ jsonrpc: '2.0', id: 612, method: 'tools/call', params: { name: 'scene_item_blend_get', arguments: { sceneId: 'scene-1', sceneItemId: 31 } } });
+assert.equal(blendInfo.result.structuredContent.result.blendMode, 'multiply');
+
+featureFake.calls.length = 0;
+const imageAdded = await featureServer.handle({
+  jsonrpc: '2.0', id: 613, method: 'tools/call',
+  params: { name: 'image_add', arguments: { sceneId: 'scene-1', file: 'C:\\allowed\\created.png', imageName: 'created-image', x: 100, y: 120, width: 500, height: 300 } },
+});
+assert.equal(imageAdded.result.isError, false, JSON.stringify(imageAdded.result.structuredContent));
+assert.equal(imageAdded.result.structuredContent.result.imageId, 'image-created');
+assert(featureFake.calls.some((entry) => entry.requestType === 'CreateInput' && entry.requestData.inputKind === 'image_source'));
+const imageInfo = await featureServer.handle({ jsonrpc: '2.0', id: 614, method: 'tools/call', params: { name: 'image_info', arguments: { imageId: 'image-created' } } });
+assert.equal(imageInfo.result.structuredContent.result.file, 'C:\\allowed\\created.png');
+const imageSet = await featureServer.handle({
+  jsonrpc: '2.0', id: 615, method: 'tools/call',
+  params: { name: 'image_set', arguments: { imageId: 'image-created', sceneId: 'scene-1', file: 'C:\\allowed\\updated.webp', linearAlpha: true, x: 200, y: 220, width: 600, height: 400 } },
+});
+assert.equal(imageSet.result.structuredContent.result.file, 'C:\\allowed\\updated.webp');
+assert.equal(imageSet.result.structuredContent.result.linearAlpha, true);
+const imageUrlRejected = await featureServer.handle({ jsonrpc: '2.0', id: 616, method: 'tools/call', params: { name: 'image_add', arguments: { sceneId: 'scene-1', file: 'https://example.invalid/a.png' } } });
+assert.equal(imageUrlRejected.result.isError, true);
+await featureServer.handle({ jsonrpc: '2.0', id: 617, method: 'tools/call', params: { name: 'image_remove', arguments: { imageId: 'image-created' } } });
+
+featureFake.calls.length = 0;
+const colorAdded = await featureServer.handle({
+  jsonrpc: '2.0', id: 618, method: 'tools/call',
+  params: { name: 'color_add', arguments: { sceneId: 'scene-1', colorName: 'created-color', color: '#112233', opacity: 50, width: 700, height: 120, x: 40, y: 50 } },
+});
+assert.equal(colorAdded.result.isError, false, JSON.stringify(colorAdded.result.structuredContent));
+const colorCreateCall = featureFake.calls.find((entry) => entry.requestType === 'CreateInput');
+assert.equal(colorCreateCall.requestData.inputKind, 'color_source_v3');
+assert.equal(colorCreateCall.requestData.inputSettings.color >>> 0, 0x80332211);
+const colorInfo = await featureServer.handle({ jsonrpc: '2.0', id: 619, method: 'tools/call', params: { name: 'color_info', arguments: { colorId: 'color-created' } } });
+assert.equal(colorInfo.result.structuredContent.result.color, '#112233');
+assert.equal(colorInfo.result.structuredContent.result.opacity, 50);
+const colorSet = await featureServer.handle({ jsonrpc: '2.0', id: 620, method: 'tools/call', params: { name: 'color_set', arguments: { colorId: 'color-created', sceneId: 'scene-1', color: '#AABBCC', opacity: 25, width: 900, x: 80 } } });
+assert.equal(colorSet.result.structuredContent.result.color, '#AABBCC');
+assert.equal(colorSet.result.structuredContent.result.width, 900);
+await featureServer.handle({ jsonrpc: '2.0', id: 621, method: 'tools/call', params: { name: 'color_remove', arguments: { colorId: 'color-created' } } });
+
+const filterList = await featureServer.handle({ jsonrpc: '2.0', id: 622, method: 'tools/call', params: { name: 'filter_list', arguments: { sourceId: 'image-base' } } });
+assert.equal(filterList.result.structuredContent.result.filters.find((filter) => filter.filterName === 'safe-existing').safeForMutation, true);
+assert.equal(filterList.result.structuredContent.result.filters.find((filter) => filter.filterName === 'unsafe-vst').safeForMutation, false);
+const unsafeInfo = await featureServer.handle({ jsonrpc: '2.0', id: 623, method: 'tools/call', params: { name: 'filter_info', arguments: { sourceId: 'image-base', filterName: 'unsafe-vst' } } });
+assert.equal(unsafeInfo.result.structuredContent.result.safeForMutation, false);
+const filterAdded = await featureServer.handle({ jsonrpc: '2.0', id: 624, method: 'tools/call', params: { name: 'filter_add', arguments: { sourceId: 'image-base', filterName: 'safe-added', filterKind: 'sharpness_filter', settings: { sharpness: 0.2 } } } });
+assert.equal(filterAdded.result.isError, false);
+const filterSet = await featureServer.handle({ jsonrpc: '2.0', id: 625, method: 'tools/call', params: { name: 'filter_set', arguments: { sourceId: 'image-base', filterName: 'safe-added', settings: { sharpness: 0.4 } } } });
+assert.equal(filterSet.result.structuredContent.result.filterSettings.sharpness, 0.4);
+const filterDisabled = await featureServer.handle({ jsonrpc: '2.0', id: 626, method: 'tools/call', params: { name: 'filter_enable', arguments: { sourceId: 'image-base', filterName: 'safe-added', enabled: false } } });
+assert.equal(filterDisabled.result.structuredContent.result.filterEnabled, false);
+const unsafeMutation = await featureServer.handle({ jsonrpc: '2.0', id: 627, method: 'tools/call', params: { name: 'filter_set', arguments: { sourceId: 'image-base', filterName: 'unsafe-vst', settings: { plugin_path: 'other.dll' } } } });
+assert.equal(unsafeMutation.result.isError, true);
+await featureServer.handle({ jsonrpc: '2.0', id: 628, method: 'tools/call', params: { name: 'filter_remove', arguments: { sourceId: 'image-base', filterName: 'safe-added' } } });
+
+const browserRawRejected = await featureServer.handle({ jsonrpc: '2.0', id: 629, method: 'tools/call', params: { name: 'input_settings_set', arguments: { inputId: 'browser-1', settings: { url: 'https://evil.invalid' } } } });
+assert.equal(browserRawRejected.result.isError, true);
+const mediaPathRejected = await featureServer.handle({ jsonrpc: '2.0', id: 630, method: 'tools/call', params: { name: 'input_settings_set', arguments: { inputId: 'media-safe-1', settings: { local_file: 'C:\\outside\\other.mp4' } } } });
+assert.equal(mediaPathRejected.result.isError, true);
+const mediaSafeRaw = await featureServer.handle({ jsonrpc: '2.0', id: 631, method: 'tools/call', params: { name: 'input_settings_set', arguments: { inputId: 'media-safe-1', settings: { looping: true } } } });
+assert.equal(mediaSafeRaw.result.isError, false);
+assert.equal(featureFake.settings.get('media-safe-1').looping, true);
+
+await featureServer.close();
+
 class RangeFakeObs {
   calls = [];
   mediaState = 'OBS_MEDIA_STATE_PLAYING';
@@ -750,5 +1012,6 @@ try {
   globalThis.WebSocket = originalWebSocket;
 }
 
+assert.equal(names.size, 62);
 await server.close();
-process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['config-toml', 'audio-mixer', 'text-sources', 'media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);
+process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['config-toml', 'audio-mixer', 'text-sources', 'image-sources', 'color-sources', 'scene-item-duplicate-lock-blend', 'safe-source-filters', 'unsafe-input-settings-rejection', 'stats-video-settings', 'rename-groups', 'media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);
