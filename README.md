@@ -8,12 +8,13 @@ Node.js 22+だけで動作する、OBS Studio / obs-websocket v5向けのstdio M
 - `media_info`でソース、再生状態、速度、音声、表示状態、全シーン配置をまとめて取得する
 - `media_play_range`で`startMs`から`endMs`までの指定区間だけを再生する
 - OBSサウンドミキサーの音量/mute/バランス/同期/モニタリング/トラック割当を取得・変更する
+- Windows OBSのGDI+文字ソースを作成し、文字列・フォント・色・背景・アウトライン・位置/大きさをまとめて操作する
 - シーン/入力/シーンアイテムを作成・列挙・削除・配置・表示切替する
 - OBSのシーンまたは入力をスクリーンショットし、MCPの`image` contentとしてAIへ直接返す
 ## IDの扱い
 独自IDファイルは持ちません。OBS自身のUUIDをそのまま使用します。
 - `sceneId` = OBS `sceneUuid`
-- `mediaId` / `inputId` = OBS `inputUuid`
+- `mediaId` / `textId` / `inputId` = OBS `inputUuid`
 - `sceneItemId` = OBSのシーン内数値ID
 そのためMCPプロセスを再起動しても、OBS側の実体が残っている限り同じUUIDを再利用できます。
 ## 必要条件
@@ -66,6 +67,37 @@ endAction: pause
 - 音声トラック1〜6の出力割当
 `audio_mixer_get`は1入力の完全なミキサー状態を取得します。`audio_mixer_set`では必要な項目だけを指定して変更でき、`monitorType`は`none` / `monitor_only` / `monitor_and_output`を受け付けます。`tracks`は`{"1":true,"2":false}`のような部分更新が可能です。`audio_mixer_mute_toggle`はmuteを反転します。
 既存の`input_audio_get` / `input_audio_set`はmuteとvolumeだけを素早く扱う簡易APIとして残しています。
+## 文字ソース
+Windows版OBSのGDI+文字ソースを専用ツールで扱えます。作成時にはOBSに登録されている`text_gdiplus`系入力のうち最新バージョンを自動選択します。
+
+- `text_add`: 文字ソースを作成し、同じ呼び出しでシーンへ配置する
+- `text_info`: 文字内容、フォント、色、背景、アウトライン、表示状態、全シーン配置を取得する
+- `text_set`: 文字内容/スタイルの変更と、位置/サイズ変更を同時に行う
+- `text_remove`: 文字入力そのものを削除し、その入力を使う全scene itemもOBS側で削除する
+
+文字スタイルは`fontName`, `fontStyle`, `fontSize`, `bold`, `italic`, `underline`, `strikeout`を指定できます。`textColor`, `backgroundColor`, `outlineColor`は`#RRGGBB`形式で、`textOpacity`, `backgroundOpacity`, `outlineOpacity`は0〜100です。アウトライン幅は`outlineSize`の1〜20、配置は`align=left|center|right`と`verticalAlign=top|center|bottom`を使います。
+
+シーン上の配置は`x`, `y`, `width`, `height`, `fit`, `rotation`を同じ呼び出しで指定できます。`width`と`height`は対で指定し、`fit`は`contain` / `cover` / `stretch`です。`text_set`で配置変更する際、その文字ソースのscene itemが1個だけなら`textId`だけで自動解決します。同じ文字ソースが複数シーンまたは複数scene itemに置かれている場合は`sceneId`/`sceneName`を指定し、同一シーンに複数ある場合はさらに`sceneItemId`を指定します。
+
+例として、背景付きタイトルを作る場合は次の要素を1回の`text_add`へ渡せます。
+```text
+sceneId: <scene UUID>
+text: "Title"
+fontName: "Yu Gothic"
+fontSize: 52
+bold: true
+textColor: "#FFFFFF"
+backgroundColor: "#202020"
+backgroundOpacity: 80
+outline: true
+outlineSize: 2
+outlineColor: "#000000"
+x: 100
+y: 100
+width: 1000
+height: 180
+fit: contain
+```
 ## スクリーンショット
 `screenshot`はOBSの`GetSourceScreenshot`を使います。`sourceId`/`sourceName`を省略すると現在のProgramシーンを撮ります。既定はPNG、最大1280x720です。
 返り値にはメタデータ用text contentに加えて、次のMCP image contentが含まれます。
@@ -74,7 +106,7 @@ endAction: pause
 ```
 したがってAIは別のファイル読み取りMCPを経由せず、そのツール結果の画像を直接視覚入力として扱えます。画像はPNG/JPEG/WebPの実バイトを検査し、既定8 MiBを超える結果は拒否します。
 ## 実装済みツール
-`obs_status`, `scene_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_item_list`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `input_list`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `audio_mixer_list`, `audio_mixer_get`, `audio_mixer_set`, `audio_mixer_mute_toggle`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
+`obs_status`, `scene_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_item_list`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `input_list`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `audio_mixer_list`, `audio_mixer_get`, `audio_mixer_set`, `audio_mixer_mute_toggle`, `text_add`, `text_info`, `text_set`, `text_remove`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
 ## 構文確認
 ```text
 node --check server.mjs

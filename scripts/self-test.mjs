@@ -10,6 +10,22 @@ const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 class FakeObs {
   url = 'ws://fake:4455';
   calls = [];
+  textSettings = {
+    text: 'Hello',
+    font: { face: 'Arial', style: 'Regular', size: 48, flags: 1 },
+    color: 0xFFFFFF,
+    opacity: 100,
+    bk_color: 0x112233,
+    bk_opacity: 25,
+    outline: true,
+    outline_size: 2,
+    outline_color: 0x000000,
+    outline_opacity: 100,
+    align: 'left',
+    valign: 'top',
+    antialiasing: true,
+  };
+  createdTextSettings = null;
 
   async connect() {
     return {
@@ -37,15 +53,32 @@ class FakeObs {
         };
       case 'GetInputList':
         return {
-          inputs: [{
-            inputName: 'clip',
-            inputUuid: 'media-1',
-            inputKind: 'ffmpeg_source',
-            unversionedInputKind: 'ffmpeg_source',
-            inputKindCaps: 2,
-          }],
+          inputs: [
+            {
+              inputName: 'clip',
+              inputUuid: 'media-1',
+              inputKind: 'ffmpeg_source',
+              unversionedInputKind: 'ffmpeg_source',
+              inputKindCaps: 2,
+            },
+            {
+              inputName: 'title',
+              inputUuid: 'text-1',
+              inputKind: 'text_gdiplus_v3',
+              unversionedInputKind: 'text_gdiplus',
+              inputKindCaps: 1,
+            },
+          ],
         };
-      case 'GetInputSettings':
+      case 'GetInputKindList':
+        return { inputKinds: ['ffmpeg_source', 'text_gdiplus', 'text_gdiplus_v2', 'text_gdiplus_v3'] };
+      case 'GetInputSettings': {
+        if (requestData?.inputUuid === 'text-1') {
+          return { inputKind: 'text_gdiplus_v3', inputSettings: this.textSettings };
+        }
+        if (requestData?.inputUuid === 'text-created') {
+          return { inputKind: 'text_gdiplus_v3', inputSettings: this.createdTextSettings ?? {} };
+        }
         return {
           inputKind: 'ffmpeg_source',
           inputSettings: {
@@ -57,7 +90,21 @@ class FakeObs {
             speed_percent: 150,
           },
         };
-      case 'SetInputSettings':
+      }
+      case 'SetInputSettings': {
+        if (requestData?.inputUuid === 'text-1' || requestData?.inputUuid === 'text-created') {
+          const current = requestData.inputUuid === 'text-1' ? this.textSettings : (this.createdTextSettings ?? {});
+          const update = requestData.inputSettings ?? {};
+          const merged = {
+            ...current,
+            ...update,
+            ...(update.font ? { font: { ...(current.font ?? {}), ...update.font } } : {}),
+          };
+          if (requestData.inputUuid === 'text-1') this.textSettings = merged;
+          else this.createdTextSettings = merged;
+        }
+        return {};
+      }
       case 'SetMediaInputCursor':
       case 'OffsetMediaInputCursor':
       case 'TriggerMediaInputAction':
@@ -69,10 +116,27 @@ class FakeObs {
       case 'SetInputAudioMonitorType':
       case 'SetInputAudioTracks':
       case 'ToggleInputMute':
+      case 'RemoveInput':
         return {};
       case 'CreateInput':
+        if (requestData?.inputKind?.startsWith('text_gdiplus')) {
+          this.createdTextSettings = requestData.inputSettings;
+          return { inputUuid: 'text-created', sceneItemId: 10 };
+        }
         return { inputUuid: 'media-created', sceneItemId: 9 };
       case 'GetSceneItemTransform':
+        if (requestData?.sceneItemId === 10) {
+          return {
+            sceneItemTransform: {
+              sourceWidth: 800,
+              sourceHeight: 120,
+              positionX: 100,
+              positionY: 200,
+              width: 800,
+              height: 200,
+            },
+          };
+        }
         return {
           sceneItemTransform: {
             sourceWidth: 1920,
@@ -109,23 +173,42 @@ class FakeObs {
         };
       case 'GetSceneItemList':
         return {
-          sceneItems: [{
-            sceneItemId: 7,
-            sceneItemIndex: 0,
-            sceneItemEnabled: true,
-            sceneItemLocked: false,
-            sourceName: 'clip',
-            sourceUuid: 'media-1',
-            inputKind: 'ffmpeg_source',
-            sceneItemTransform: {
-              sourceWidth: 1920,
-              sourceHeight: 1080,
-              positionX: 12,
-              positionY: 34,
-              width: 640,
-              height: 360,
+          sceneItems: [
+            {
+              sceneItemId: 7,
+              sceneItemIndex: 0,
+              sceneItemEnabled: true,
+              sceneItemLocked: false,
+              sourceName: 'clip',
+              sourceUuid: 'media-1',
+              inputKind: 'ffmpeg_source',
+              sceneItemTransform: {
+                sourceWidth: 1920,
+                sourceHeight: 1080,
+                positionX: 12,
+                positionY: 34,
+                width: 640,
+                height: 360,
+              },
             },
-          }],
+            {
+              sceneItemId: 8,
+              sceneItemIndex: 1,
+              sceneItemEnabled: true,
+              sceneItemLocked: false,
+              sourceName: 'title',
+              sourceUuid: 'text-1',
+              inputKind: 'text_gdiplus_v3',
+              sceneItemTransform: {
+                sourceWidth: 640,
+                sourceHeight: 80,
+                positionX: 50,
+                positionY: 60,
+                width: 640,
+                height: 80,
+              },
+            },
+          ],
         };
       case 'GetSourceScreenshot':
         return { imageData: `data:image/png;base64,${TINY_PNG_BASE64}` };
@@ -148,7 +231,7 @@ assert.equal(initialized.result.serverInfo.name, 'obs-control');
 
 const listed = await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
 const names = new Set(listed.result.tools.map((tool) => tool.name));
-for (const requiredTool of ['media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot', 'audio_mixer_list', 'audio_mixer_get', 'audio_mixer_set', 'audio_mixer_mute_toggle']) {
+for (const requiredTool of ['media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot', 'audio_mixer_list', 'audio_mixer_get', 'audio_mixer_set', 'audio_mixer_mute_toggle', 'text_add', 'text_info', 'text_set', 'text_remove']) {
   assert(names.has(requiredTool), `missing tool ${requiredTool}`);
 }
 
@@ -239,6 +322,119 @@ assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioBalance' &
 assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioSyncOffset' && entry.requestData.inputAudioSyncOffset === 250));
 assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioMonitorType' && entry.requestData.monitorType === 'OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT'));
 assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioTracks' && entry.requestData.inputAudioTracks['2'] === true));
+
+fake.calls.length = 0;
+const textInfoResult = await server.handle({
+  jsonrpc: '2.0',
+  id: 402,
+  method: 'tools/call',
+  params: { name: 'text_info', arguments: { textId: 'text-1' } },
+});
+assert.equal(textInfoResult.result.isError, false, JSON.stringify(textInfoResult.result.structuredContent));
+const initialTextInfo = textInfoResult.result.structuredContent.result;
+assert.equal(initialTextInfo.text, 'Hello');
+assert.equal(initialTextInfo.font.name, 'Arial');
+assert.equal(initialTextInfo.font.size, 48);
+assert.equal(initialTextInfo.font.bold, true);
+assert.equal(initialTextInfo.backgroundColor, '#112233');
+assert.equal(initialTextInfo.backgroundOpacity, 25);
+assert.equal(initialTextInfo.placements[0].sceneItemId, 8);
+
+fake.calls.length = 0;
+const textAdded = await server.handle({
+  jsonrpc: '2.0',
+  id: 403,
+  method: 'tools/call',
+  params: {
+    name: 'text_add',
+    arguments: {
+      sceneId: 'scene-1',
+      text: 'Created title',
+      textName: 'created-title',
+      fontName: 'Yu Gothic',
+      fontSize: 52,
+      bold: true,
+      italic: true,
+      textColor: '#12AB34',
+      backgroundColor: '#102030',
+      backgroundOpacity: 70,
+      outline: true,
+      outlineSize: 3,
+      outlineColor: '#FFFFFF',
+      outlineOpacity: 90,
+      align: 'center',
+      verticalAlign: 'bottom',
+      x: 100,
+      y: 200,
+      width: 800,
+      height: 200,
+      fit: 'contain',
+    },
+  },
+});
+assert.equal(textAdded.result.isError, false, JSON.stringify(textAdded.result.structuredContent));
+assert.equal(textAdded.result.structuredContent.result.textId, 'text-created');
+const textCreateCall = fake.calls.find((entry) => entry.requestType === 'CreateInput');
+assert.equal(textCreateCall.requestData.inputKind, 'text_gdiplus_v3');
+assert.equal(textCreateCall.requestData.inputSettings.font.face, 'Yu Gothic');
+assert.equal(textCreateCall.requestData.inputSettings.font.size, 52);
+assert.equal(textCreateCall.requestData.inputSettings.font.flags, 3);
+assert.equal(textCreateCall.requestData.inputSettings.color, 0x12AB34);
+assert.equal(textCreateCall.requestData.inputSettings.bk_color, 0x102030);
+assert.equal(textCreateCall.requestData.inputSettings.bk_opacity, 70);
+assert(fake.calls.some((entry) => entry.requestType === 'SetSceneItemTransform' && entry.requestData.sceneItemId === 10));
+
+fake.calls.length = 0;
+const textSetResult = await server.handle({
+  jsonrpc: '2.0',
+  id: 404,
+  method: 'tools/call',
+  params: {
+    name: 'text_set',
+    arguments: {
+      textId: 'text-1',
+      sceneId: 'scene-1',
+      text: 'Updated title',
+      fontName: 'Meiryo',
+      fontSize: 64,
+      bold: false,
+      italic: true,
+      textColor: '#FF0000',
+      backgroundColor: '#0000FF',
+      backgroundOpacity: 50,
+      outline: true,
+      outlineSize: 4,
+      outlineColor: '#00FF00',
+      align: 'right',
+      verticalAlign: 'center',
+      x: 300,
+      y: 400,
+      width: 900,
+      height: 250,
+    },
+  },
+});
+assert.equal(textSetResult.result.isError, false, JSON.stringify(textSetResult.result.structuredContent));
+const textSettingsCall = fake.calls.find((entry) => entry.requestType === 'SetInputSettings');
+assert.equal(textSettingsCall.requestData.inputSettings.text, 'Updated title');
+assert.equal(textSettingsCall.requestData.inputSettings.font.face, 'Meiryo');
+assert.equal(textSettingsCall.requestData.inputSettings.font.size, 64);
+assert.equal(textSettingsCall.requestData.inputSettings.font.flags, 2);
+assert.equal(textSettingsCall.requestData.inputSettings.color, 0xFF0000);
+assert(fake.calls.some((entry) => entry.requestType === 'SetSceneItemTransform' && entry.requestData.sceneItemId === 8));
+assert.equal(textSetResult.result.structuredContent.result.text, 'Updated title');
+assert.equal(textSetResult.result.structuredContent.result.font.italic, true);
+assert.equal(textSetResult.result.structuredContent.result.font.bold, false);
+
+fake.calls.length = 0;
+const textRemoved = await server.handle({
+  jsonrpc: '2.0',
+  id: 405,
+  method: 'tools/call',
+  params: { name: 'text_remove', arguments: { textId: 'text-1' } },
+});
+assert.equal(textRemoved.result.isError, false);
+assert(fake.calls.some((entry) => entry.requestType === 'RemoveInput' && entry.requestData.inputUuid === 'text-1'));
 
 fake.calls.length = 0;
 const speedSet = await server.handle({
@@ -430,4 +626,4 @@ try {
 }
 
 await server.close();
-process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['config-toml', 'audio-mixer', 'media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);
+process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['config-toml', 'audio-mixer', 'text-sources', 'media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);

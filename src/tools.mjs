@@ -38,6 +38,39 @@ const MEDIA_SELECTOR = {
   mediaId: { type: 'string', minLength: 1, description: 'Media ID. This is the OBS input UUID returned by media_add/media_list.' },
   mediaName: { type: 'string', minLength: 1, description: 'OBS media input name.' },
 };
+const TEXT_SELECTOR = {
+  textId: { type: 'string', minLength: 1, description: 'Text source ID. This is the OBS input UUID returned by text_add.' },
+  textName: { type: 'string', minLength: 1, description: 'OBS text input name.' },
+};
+const TEXT_STYLE_PROPERTIES = {
+  text: { type: 'string', description: 'Displayed text. Empty string is allowed.' },
+  fontName: { type: 'string', minLength: 1, description: 'Font face/family, for example Arial or Yu Gothic.' },
+  fontStyle: { type: 'string', description: 'Optional OBS/Qt font style name.' },
+  fontSize: { type: 'integer', minimum: 1, maximum: 4096 },
+  bold: { type: 'boolean' },
+  italic: { type: 'boolean' },
+  underline: { type: 'boolean' },
+  strikeout: { type: 'boolean' },
+  textColor: { type: 'string', pattern: '^#?[0-9A-Fa-f]{6}$', description: 'RGB color as #RRGGBB.' },
+  textOpacity: { type: 'integer', minimum: 0, maximum: 100 },
+  backgroundColor: { type: 'string', pattern: '^#?[0-9A-Fa-f]{6}$', description: 'Background RGB color as #RRGGBB.' },
+  backgroundOpacity: { type: 'integer', minimum: 0, maximum: 100 },
+  outline: { type: 'boolean' },
+  outlineSize: { type: 'integer', minimum: 1, maximum: 20 },
+  outlineColor: { type: 'string', pattern: '^#?[0-9A-Fa-f]{6}$', description: 'Outline RGB color as #RRGGBB.' },
+  outlineOpacity: { type: 'integer', minimum: 0, maximum: 100 },
+  align: { type: 'string', enum: ['left', 'center', 'right'] },
+  verticalAlign: { type: 'string', enum: ['top', 'center', 'bottom'] },
+  antialiasing: { type: 'boolean' },
+};
+const TEXT_PLACEMENT_PROPERTIES = {
+  x: { type: 'number', minimum: -90000, maximum: 90000 },
+  y: { type: 'number', minimum: -90000, maximum: 90000 },
+  width: { type: 'number', exclusiveMinimum: 0, maximum: 90000 },
+  height: { type: 'number', exclusiveMinimum: 0, maximum: 90000 },
+  fit: { type: 'string', enum: ['contain', 'cover', 'stretch'], default: 'contain' },
+  rotation: { type: 'number', minimum: -360, maximum: 360 },
+};
 
 export const TOOL_SCHEMAS = [
   schema('obs_status', 'OBS status', 'Connect to OBS and return OBS/obs-websocket versions plus active range playbacks.', {}, [], READ_ONLY),
@@ -123,6 +156,21 @@ export const TOOL_SCHEMAS = [
     },
   }),
   schema('audio_mixer_mute_toggle', 'Toggle audio mixer mute', 'Toggle mute for one OBS audio input and return its complete mixer state.', INPUT_SELECTOR),
+  schema('text_add', 'Add text', 'Create a Windows OBS GDI+ text source and place it in a scene. Text style and scene placement can be specified in the same call.', {
+    ...SCENE_SELECTOR,
+    textName: { type: 'string', minLength: 1 },
+    ...TEXT_STYLE_PROPERTIES,
+    ...TEXT_PLACEMENT_PROPERTIES,
+  }, ['text']),
+  schema('text_info', 'Get text info', 'Get text content, font/style, colors, background, outline, alignment, visibility, and all scene placements for a GDI+ text source.', TEXT_SELECTOR, [], READ_ONLY),
+  schema('text_set', 'Set text', 'Change text content/style and optionally move/resize the scene item in one call. If the text source has multiple placements, specify sceneId/sceneName and optionally sceneItemId.', {
+    ...TEXT_SELECTOR,
+    ...SCENE_SELECTOR,
+    sceneItemId: { type: 'integer', minimum: 0 },
+    ...TEXT_STYLE_PROPERTIES,
+    ...TEXT_PLACEMENT_PROPERTIES,
+  }),
+  schema('text_remove', 'Remove text', 'Delete a GDI+ text input and all of its associated scene items.', TEXT_SELECTOR, [], DESTRUCTIVE),
   schema('media_list', 'List media', 'List Media Source (ffmpeg_source) inputs. mediaId is the persistent OBS input UUID.', {
     includeSettings: { type: 'boolean', default: false },
   }, [], READ_ONLY),
@@ -206,6 +254,10 @@ const MONITOR_TYPES = {
   monitor_only: 'OBS_MONITORING_TYPE_MONITOR_ONLY',
   monitor_and_output: 'OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT',
 };
+const OBS_FONT_BOLD = 1 << 0;
+const OBS_FONT_ITALIC = 1 << 1;
+const OBS_FONT_UNDERLINE = 1 << 2;
+const OBS_FONT_STRIKEOUT = 1 << 3;
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 function positiveIntegerEnv(name, fallback) {
@@ -234,6 +286,13 @@ function optionalString(args, name) {
   const value = args[name];
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function optionalText(args, name) {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${name} must be a string`);
   return value;
 }
 
@@ -317,6 +376,219 @@ async function resolveMediaReference(obs, args) {
     throw new Error(`Input is not a Media Source: ${ref.inputUuid ?? ref.inputName}`);
   }
   return { ref: { inputUuid: found.inputUuid }, mediaId: found.inputUuid, mediaName: found.inputName };
+}
+
+function textSelector(args) {
+  return selector(args, 'textId', 'textName', 'inputUuid', 'inputName', 'text');
+}
+
+function isGdiTextInput(input) {
+  return input?.unversionedInputKind === 'text_gdiplus' || /^text_gdiplus(?:_v\d+)?$/.test(input?.inputKind ?? '');
+}
+
+async function resolveTextReference(obs, args) {
+  const ref = textSelector(args);
+  const data = await obs.call('GetInputList', {});
+  const found = (data.inputs ?? []).find((item) => ref.inputUuid ? item.inputUuid === ref.inputUuid : item.inputName === ref.inputName);
+  if (!found) throw new Error(`Text input not found: ${ref.inputUuid ?? ref.inputName}`);
+  if (!isGdiTextInput(found)) throw new Error(`Input is not a Windows GDI+ text source: ${ref.inputUuid ?? ref.inputName}`);
+  return { ref: { inputUuid: found.inputUuid }, input: found, textId: found.inputUuid, textName: found.inputName };
+}
+
+async function latestGdiTextInputKind(obs) {
+  const data = await obs.call('GetInputKindList', {});
+  const kinds = (data.inputKinds ?? []).filter((kind) => /^text_gdiplus(?:_v\d+)?$/.test(kind));
+  if (kinds.length === 0) {
+    throw new Error('OBS GDI+ text source is unavailable. The Windows obs-text plugin must be loaded.');
+  }
+  kinds.sort((a, b) => {
+    const av = Number(/^text_gdiplus_v(\d+)$/.exec(a)?.[1] ?? 0);
+    const bv = Number(/^text_gdiplus_v(\d+)$/.exec(b)?.[1] ?? 0);
+    return bv - av;
+  });
+  return kinds[0];
+}
+
+function textNameFor(text) {
+  const compact = text.replace(/[\u0000-\u001f]+/g, ' ').trim().replace(/\s+/g, ' ').slice(0, 32);
+  return `${compact || 'Text'} [${randomUUID().slice(0, 8)}]`;
+}
+
+function colorArgument(args, name) {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^#?[0-9A-Fa-f]{6}$/.test(value)) {
+    throw new Error(`${name} must be an RGB color in #RRGGBB form`);
+  }
+  return Number.parseInt(value.replace(/^#/, ''), 16);
+}
+
+function colorString(value, fallback) {
+  const number = Number.isFinite(value) ? Number(value) : fallback;
+  return `#${(number & 0xFFFFFF).toString(16).padStart(6, '0').toUpperCase()}`;
+}
+
+function validatePercent(value, name) {
+  if (value !== undefined && (value < 0 || value > 100)) throw new Error(`${name} must be from 0 through 100`);
+}
+
+function buildTextInputSettings(args, currentSettings = null, { creating = false } = {}) {
+  const settings = {};
+  const text = optionalText(args, 'text');
+  if (text !== undefined) settings.text = text;
+
+  const fontName = optionalString(args, 'fontName');
+  const fontStyle = optionalText(args, 'fontStyle');
+  const fontSize = optionalInteger(args, 'fontSize');
+  const bold = optionalBoolean(args, 'bold');
+  const italic = optionalBoolean(args, 'italic');
+  const underline = optionalBoolean(args, 'underline');
+  const strikeout = optionalBoolean(args, 'strikeout');
+  const fontChanged = [fontName, fontStyle, fontSize, bold, italic, underline, strikeout].some((value) => value !== undefined);
+  if (fontSize !== undefined && (fontSize < 1 || fontSize > 4096)) throw new Error('fontSize must be from 1 through 4096');
+  if (fontChanged) {
+    const previous = currentSettings?.font ?? {};
+    let flags = Number.isSafeInteger(previous.flags) ? previous.flags : 0;
+    const applyFlag = (value, mask) => {
+      if (value === undefined) return;
+      flags = value ? (flags | mask) : (flags & ~mask);
+    };
+    applyFlag(bold, OBS_FONT_BOLD);
+    applyFlag(italic, OBS_FONT_ITALIC);
+    applyFlag(underline, OBS_FONT_UNDERLINE);
+    applyFlag(strikeout, OBS_FONT_STRIKEOUT);
+    settings.font = {
+      face: fontName ?? previous.face ?? 'Arial',
+      style: fontStyle ?? previous.style ?? '',
+      size: fontSize ?? previous.size ?? 256,
+      flags,
+    };
+  }
+
+  const textColor = colorArgument(args, 'textColor');
+  const textOpacity = optionalInteger(args, 'textOpacity');
+  const backgroundColor = colorArgument(args, 'backgroundColor');
+  let backgroundOpacity = optionalInteger(args, 'backgroundOpacity');
+  const outline = optionalBoolean(args, 'outline');
+  const outlineSize = optionalInteger(args, 'outlineSize');
+  const outlineColor = colorArgument(args, 'outlineColor');
+  const outlineOpacity = optionalInteger(args, 'outlineOpacity');
+  const align = enumValue(args, 'align', ['left', 'center', 'right']);
+  const verticalAlign = enumValue(args, 'verticalAlign', ['top', 'center', 'bottom']);
+  const antialiasing = optionalBoolean(args, 'antialiasing');
+
+  validatePercent(textOpacity, 'textOpacity');
+  validatePercent(backgroundOpacity, 'backgroundOpacity');
+  validatePercent(outlineOpacity, 'outlineOpacity');
+  if (outlineSize !== undefined && (outlineSize < 1 || outlineSize > 20)) throw new Error('outlineSize must be from 1 through 20');
+  if (creating && backgroundColor !== undefined && backgroundOpacity === undefined) backgroundOpacity = 100;
+
+  if (textColor !== undefined) settings.color = textColor;
+  if (textOpacity !== undefined) settings.opacity = textOpacity;
+  if (backgroundColor !== undefined) settings.bk_color = backgroundColor;
+  if (backgroundOpacity !== undefined) settings.bk_opacity = backgroundOpacity;
+  if (outline !== undefined) settings.outline = outline;
+  else if (creating && (outlineSize !== undefined || outlineColor !== undefined || outlineOpacity !== undefined)) settings.outline = true;
+  if (outlineSize !== undefined) settings.outline_size = outlineSize;
+  if (outlineColor !== undefined) settings.outline_color = outlineColor;
+  if (outlineOpacity !== undefined) settings.outline_opacity = outlineOpacity;
+  if (align !== undefined) settings.align = align;
+  if (verticalAlign !== undefined) settings.valign = verticalAlign;
+  if (antialiasing !== undefined) settings.antialiasing = antialiasing;
+  return settings;
+}
+
+function normalizeTextSettings(settings = {}) {
+  const font = settings.font ?? {};
+  const flags = Number.isSafeInteger(font.flags) ? font.flags : 0;
+  return {
+    text: settings.text ?? '',
+    font: {
+      name: font.face ?? null,
+      style: font.style ?? '',
+      size: font.size ?? null,
+      bold: (flags & OBS_FONT_BOLD) !== 0,
+      italic: (flags & OBS_FONT_ITALIC) !== 0,
+      underline: (flags & OBS_FONT_UNDERLINE) !== 0,
+      strikeout: (flags & OBS_FONT_STRIKEOUT) !== 0,
+    },
+    textColor: colorString(settings.color, 0xFFFFFF),
+    textOpacity: settings.opacity ?? 100,
+    backgroundColor: colorString(settings.bk_color, 0x000000),
+    backgroundOpacity: settings.bk_opacity ?? 0,
+    outline: {
+      enabled: settings.outline ?? false,
+      size: settings.outline_size ?? 2,
+      color: colorString(settings.outline_color, 0xFFFFFF),
+      opacity: settings.outline_opacity ?? 100,
+    },
+    align: settings.align ?? 'left',
+    verticalAlign: settings.valign ?? 'top',
+    antialiasing: settings.antialiasing ?? true,
+  };
+}
+
+async function getSourcePlacements(obs, sourceId) {
+  const sceneData = await obs.call('GetSceneList');
+  const sceneLists = await Promise.all((sceneData.scenes ?? []).map(async (scene) => {
+    const items = await obs.call('GetSceneItemList', { sceneUuid: scene.sceneUuid });
+    return { scene, items: items.sceneItems ?? [] };
+  }));
+  const placements = [];
+  for (const { scene, items } of sceneLists) {
+    for (const item of items) {
+      if (item.sourceUuid !== sourceId) continue;
+      placements.push({
+        sceneId: scene.sceneUuid,
+        sceneName: scene.sceneName,
+        sceneItemId: item.sceneItemId,
+        sceneItemIndex: item.sceneItemIndex,
+        enabled: item.sceneItemEnabled,
+        locked: item.sceneItemLocked,
+        transform: item.sceneItemTransform,
+      });
+    }
+  }
+  return placements;
+}
+
+async function resolveTextPlacement(obs, textId, args) {
+  const requestedScene = sceneSelector(args, { required: false });
+  const requestedItemId = optionalInteger(args, 'sceneItemId');
+  if (requestedItemId !== undefined && requestedItemId < 0) throw new Error('sceneItemId must be >= 0');
+  if (requestedScene) {
+    const data = await obs.call('GetSceneItemList', requestedScene);
+    let matches = (data.sceneItems ?? []).filter((item) => item.sourceUuid === textId);
+    if (requestedItemId !== undefined) matches = matches.filter((item) => item.sceneItemId === requestedItemId);
+    if (matches.length === 0) throw new Error('The text source is not placed in the specified scene/sceneItemId');
+    if (matches.length > 1) throw new Error('The text source appears multiple times in that scene; specify sceneItemId');
+    return { sceneRef: requestedScene, sceneItemId: matches[0].sceneItemId };
+  }
+
+  let placements = await getSourcePlacements(obs, textId);
+  if (requestedItemId !== undefined) placements = placements.filter((item) => item.sceneItemId === requestedItemId);
+  if (placements.length === 0) throw new Error('No scene placement was found for this text source');
+  if (placements.length > 1) throw new Error('The text source has multiple scene placements; specify sceneId/sceneName and optionally sceneItemId');
+  return { sceneRef: { sceneUuid: placements[0].sceneId }, sceneItemId: placements[0].sceneItemId };
+}
+
+async function getTextInfo(obs, resolved) {
+  const [settingsData, active, placements] = await Promise.all([
+    obs.call('GetInputSettings', resolved.ref),
+    obs.call('GetSourceActive', { sourceUuid: resolved.textId }),
+    getSourcePlacements(obs, resolved.textId),
+  ]);
+  const settings = settingsData.inputSettings ?? {};
+  return {
+    textId: resolved.textId,
+    textName: resolved.textName,
+    inputKind: resolved.input.inputKind,
+    ...normalizeTextSettings(settings),
+    videoActive: active.videoActive,
+    videoShowing: active.videoShowing,
+    placements,
+    settings,
+  };
 }
 
 function normalizedScene(scene) {
@@ -674,6 +946,72 @@ export function createToolHandler({ obs, ranges }) {
         }
         await obs.call('ToggleInputMute', resolved.ref);
         return okResult(await getAudioMixerState(obs, resolved.ref, resolved.input));
+      }
+      case 'text_add': {
+        const sceneRef = sceneSelector(args);
+        const text = optionalText(args, 'text');
+        if (text === undefined) throw new Error('text is required');
+        const textName = optionalString(args, 'textName') ?? textNameFor(text);
+        const inputKind = await latestGdiTextInputKind(obs);
+        const settings = buildTextInputSettings(args, null, { creating: true });
+        settings.read_from_file = false;
+        const created = await obs.call('CreateInput', {
+          ...sceneRef,
+          inputName: textName,
+          inputKind,
+          inputSettings: settings,
+          sceneItemEnabled: true,
+        });
+        const placement = buildTransform(args);
+        if (Object.keys(placement).length > 0) {
+          await obs.call('SetSceneItemTransform', {
+            ...sceneRef,
+            sceneItemId: created.sceneItemId,
+            sceneItemTransform: placement,
+          });
+        }
+        const [settingsData, transformData] = await Promise.all([
+          obs.call('GetInputSettings', { inputUuid: created.inputUuid }),
+          obs.call('GetSceneItemTransform', { ...sceneRef, sceneItemId: created.sceneItemId }),
+        ]);
+        return okResult({
+          textId: created.inputUuid,
+          textName,
+          inputKind: settingsData.inputKind ?? inputKind,
+          sceneItemId: created.sceneItemId,
+          ...normalizeTextSettings(settingsData.inputSettings ?? settings),
+          transform: transformData.sceneItemTransform,
+        });
+      }
+      case 'text_info': {
+        const resolved = await resolveTextReference(obs, args);
+        return okResult(await getTextInfo(obs, resolved));
+      }
+      case 'text_set': {
+        const resolved = await resolveTextReference(obs, args);
+        const current = await obs.call('GetInputSettings', resolved.ref);
+        const settings = buildTextInputSettings(args, current.inputSettings ?? {});
+        const placement = buildTransform(args);
+        if (Object.keys(settings).length === 0 && Object.keys(placement).length === 0) {
+          throw new Error('Provide at least one text style/content or placement property to change');
+        }
+        if (Object.keys(settings).length > 0) {
+          await obs.call('SetInputSettings', { ...resolved.ref, inputSettings: settings, overlay: true });
+        }
+        if (Object.keys(placement).length > 0) {
+          const target = await resolveTextPlacement(obs, resolved.textId, args);
+          await obs.call('SetSceneItemTransform', {
+            ...target.sceneRef,
+            sceneItemId: target.sceneItemId,
+            sceneItemTransform: placement,
+          });
+        }
+        return okResult(await getTextInfo(obs, resolved));
+      }
+      case 'text_remove': {
+        const resolved = await resolveTextReference(obs, args);
+        await obs.call('RemoveInput', resolved.ref);
+        return okResult({ removed: true, textId: resolved.textId, textName: resolved.textName });
       }
       case 'media_list': {
         const includeSettings = optionalBoolean(args, 'includeSettings', false);
