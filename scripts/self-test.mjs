@@ -10,12 +10,16 @@ const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 class FakeObs {
   url = 'ws://fake:4455';
   calls = [];
+  mediaState = 'OBS_MEDIA_STATE_STOPPED';
+  mediaCursor = null;
+  mediaDuration = 30000;
+  mediaSpeedPercent = 100;
   textSettings = {
     text: 'Hello',
     font: { face: 'Arial', style: 'Regular', size: 48, flags: 1 },
     color: 0xFFFFFF,
     opacity: 100,
-    bk_color: 0x112233,
+    bk_color: 0x332211,
     bk_opacity: 25,
     outline: true,
     outline_size: 2,
@@ -87,7 +91,7 @@ class FakeObs {
             looping: false,
             restart_on_activate: false,
             clear_on_media_end: true,
-            speed_percent: 150,
+            speed_percent: this.mediaSpeedPercent,
           },
         };
       }
@@ -102,12 +106,46 @@ class FakeObs {
           };
           if (requestData.inputUuid === 'text-1') this.textSettings = merged;
           else this.createdTextSettings = merged;
+        } else if (requestData?.inputSettings?.speed_percent !== undefined) {
+          this.mediaSpeedPercent = requestData.inputSettings.speed_percent;
+          this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+          this.mediaCursor = 0;
         }
         return {};
       }
       case 'SetMediaInputCursor':
+        if (!['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState)) {
+          throw new Error('The media input must be playing or paused in order to set the cursor position.');
+        }
+        this.mediaCursor = requestData.mediaCursor;
+        return {};
       case 'OffsetMediaInputCursor':
+        if (!['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState)) {
+          throw new Error('The media input must be playing or paused in order to set the cursor position.');
+        }
+        this.mediaCursor = Math.max(0, (this.mediaCursor ?? 0) + requestData.mediaCursorOffset);
+        return {};
       case 'TriggerMediaInputAction':
+        switch (requestData.mediaAction) {
+          case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY':
+            this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+            this.mediaCursor ??= 0;
+            break;
+          case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE':
+            if (this.mediaState === 'OBS_MEDIA_STATE_PLAYING') this.mediaState = 'OBS_MEDIA_STATE_PAUSED';
+            break;
+          case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP':
+            this.mediaState = 'OBS_MEDIA_STATE_STOPPED';
+            this.mediaCursor = null;
+            break;
+          case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART':
+            this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+            this.mediaCursor = 0;
+            break;
+          default:
+            throw new Error(`Unknown fake media action: ${requestData.mediaAction}`);
+        }
+        return {};
       case 'SetSceneItemTransform':
       case 'SetInputMute':
       case 'SetInputVolume':
@@ -148,7 +186,11 @@ class FakeObs {
           },
         };
       case 'GetMediaInputStatus':
-        return { mediaState: 'OBS_MEDIA_STATE_PLAYING', mediaDuration: 30000, mediaCursor: 12500 };
+        return {
+          mediaState: this.mediaState,
+          mediaDuration: ['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState) ? this.mediaDuration : null,
+          mediaCursor: ['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState) ? this.mediaCursor : null,
+        };
       case 'GetInputMute':
         return { inputMuted: false };
       case 'GetInputVolume':
@@ -255,15 +297,29 @@ const played = await server.handle({
     arguments: { mediaId: 'media-1', speedPercent: 150, startMs: 12000 },
   },
 });
-assert.equal(played.result.isError, false);
+assert.equal(played.result.isError, false, JSON.stringify(played.result.structuredContent));
 assert.equal(played.result.structuredContent.result.mediaId, 'media-1');
-assert.deepEqual(
-  fake.calls.slice(0, 4).map((entry) => entry.requestType),
-  ['GetInputList', 'SetInputSettings', 'SetMediaInputCursor', 'TriggerMediaInputAction'],
-);
-assert.equal(fake.calls[1].requestData.inputSettings.speed_percent, 150);
-assert.equal(fake.calls[2].requestData.mediaCursor, 12000);
-assert.equal(fake.calls[3].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY');
+assert.deepEqual(fake.calls.slice(0, 12).map((entry) => entry.requestType), [
+  'GetInputList',
+  'GetMediaInputStatus',
+  'SetInputSettings',
+  'TriggerMediaInputAction',
+  'GetMediaInputStatus',
+  'TriggerMediaInputAction',
+  'GetMediaInputStatus',
+  'SetMediaInputCursor',
+  'GetMediaInputStatus',
+  'TriggerMediaInputAction',
+  'GetMediaInputStatus',
+  'GetInputSettings',
+]);
+assert.equal(fake.calls[2].requestData.inputSettings.speed_percent, 150);
+assert.equal(fake.calls[3].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART');
+assert.equal(fake.calls[5].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE');
+assert.equal(fake.calls[7].requestData.mediaCursor, 12000);
+assert.equal(fake.calls[9].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY');
+assert.equal(fake.mediaState, 'OBS_MEDIA_STATE_PLAYING');
+assert.equal(fake.mediaCursor, 12000);
 
 fake.calls.length = 0;
 const info = await server.handle({
@@ -379,8 +435,8 @@ assert.equal(textCreateCall.requestData.inputKind, 'text_gdiplus_v3');
 assert.equal(textCreateCall.requestData.inputSettings.font.face, 'Yu Gothic');
 assert.equal(textCreateCall.requestData.inputSettings.font.size, 52);
 assert.equal(textCreateCall.requestData.inputSettings.font.flags, 3);
-assert.equal(textCreateCall.requestData.inputSettings.color, 0x12AB34);
-assert.equal(textCreateCall.requestData.inputSettings.bk_color, 0x102030);
+assert.equal(textCreateCall.requestData.inputSettings.color, 0x34AB12);
+assert.equal(textCreateCall.requestData.inputSettings.bk_color, 0x302010);
 assert.equal(textCreateCall.requestData.inputSettings.bk_opacity, 70);
 assert(fake.calls.some((entry) => entry.requestType === 'SetSceneItemTransform' && entry.requestData.sceneItemId === 10));
 
@@ -420,7 +476,9 @@ assert.equal(textSettingsCall.requestData.inputSettings.text, 'Updated title');
 assert.equal(textSettingsCall.requestData.inputSettings.font.face, 'Meiryo');
 assert.equal(textSettingsCall.requestData.inputSettings.font.size, 64);
 assert.equal(textSettingsCall.requestData.inputSettings.font.flags, 2);
-assert.equal(textSettingsCall.requestData.inputSettings.color, 0xFF0000);
+assert.equal(textSettingsCall.requestData.inputSettings.color, 0x0000FF);
+assert.equal(textSettingsCall.requestData.inputSettings.bk_color, 0xFF0000);
+assert.equal(textSettingsCall.requestData.inputSettings.outline_color, 0x00FF00);
 assert(fake.calls.some((entry) => entry.requestType === 'SetSceneItemTransform' && entry.requestData.sceneItemId === 8));
 assert.equal(textSetResult.result.structuredContent.result.text, 'Updated title');
 assert.equal(textSetResult.result.structuredContent.result.font.italic, true);
@@ -445,6 +503,9 @@ const speedSet = await server.handle({
 });
 assert.equal(speedSet.result.isError, false);
 assert(fake.calls.some((entry) => entry.requestType === 'SetInputSettings' && entry.requestData.inputSettings.speed_percent === 80));
+assert.equal(speedSet.result.structuredContent.result.speedPercent, 80);
+assert.equal(fake.mediaState, 'OBS_MEDIA_STATE_PLAYING');
+assert.equal(fake.mediaCursor, 12000);
 
 fake.calls.length = 0;
 const added = await server.handle({
@@ -483,9 +544,22 @@ const rangeTool = await server.handle({
 });
 assert.equal(rangeTool.result.isError, false);
 assert.deepEqual(
-  fake.calls.slice(0, 4).map((entry) => entry.requestType),
-  ['GetInputList', 'SetInputSettings', 'SetMediaInputCursor', 'TriggerMediaInputAction'],
+  fake.calls.slice(0, 9).map((entry) => entry.requestType),
+  [
+    'GetInputList',
+    'SetInputSettings',
+    'GetMediaInputStatus',
+    'TriggerMediaInputAction',
+    'GetMediaInputStatus',
+    'SetMediaInputCursor',
+    'GetMediaInputStatus',
+    'TriggerMediaInputAction',
+    'GetMediaInputStatus',
+  ],
 );
+assert.equal(fake.calls[3].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE');
+assert.equal(fake.calls[5].requestData.mediaCursor, 1000);
+assert.equal(fake.calls[7].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY');
 await server.handle({
   jsonrpc: '2.0',
   id: 44,
@@ -508,17 +582,38 @@ assert.equal(screenshot.result.structuredContent.result.height, 1);
 
 class RangeFakeObs {
   calls = [];
-  statusCalls = 0;
+  mediaState = 'OBS_MEDIA_STATE_PLAYING';
+  mediaCursor = 900;
 
   async call(requestType, requestData) {
     this.calls.push({ requestType, requestData });
     if (requestType === 'GetMediaInputStatus') {
-      this.statusCalls += 1;
+      if (this.mediaState === 'OBS_MEDIA_STATE_PLAYING') this.mediaCursor += 300;
       return {
-        mediaState: 'OBS_MEDIA_STATE_PLAYING',
+        mediaState: this.mediaState,
         mediaDuration: 10000,
-        mediaCursor: this.statusCalls === 1 ? 900 : 1100,
+        mediaCursor: this.mediaCursor,
       };
+    }
+    if (requestType === 'TriggerMediaInputAction') {
+      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE') this.mediaState = 'OBS_MEDIA_STATE_PAUSED';
+      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY') this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART') {
+        this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+        this.mediaCursor = 0;
+      }
+      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP') {
+        this.mediaState = 'OBS_MEDIA_STATE_STOPPED';
+        this.mediaCursor = null;
+      }
+      return {};
+    }
+    if (requestType === 'SetMediaInputCursor') {
+      if (!['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState)) {
+        throw new Error('seek requires playing or paused');
+      }
+      this.mediaCursor = requestData.mediaCursor;
+      return {};
     }
     return {};
   }

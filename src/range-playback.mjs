@@ -14,7 +14,31 @@ const ACTIVE_STATES = new Set([
   'OBS_MEDIA_STATE_BUFFERING',
   'OBS_MEDIA_STATE_PAUSED',
 ]);
+const TIME_VALID_STATES = new Set([
+  'OBS_MEDIA_STATE_PLAYING',
+  'OBS_MEDIA_STATE_PAUSED',
+]);
 const STARTUP_GRACE_MS = 3000;
+const STATE_SETTLE_TIMEOUT_MS = 2000;
+const STATE_POLL_MS = 25;
+const SEEK_TOLERANCE_MS = 1500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForStatus(obs, mediaId, predicate, description) {
+  const deadline = Date.now() + STATE_SETTLE_TIMEOUT_MS;
+  let status = await obs.call('GetMediaInputStatus', { inputUuid: mediaId });
+  while (!predicate(status)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${description}; last state=${status.mediaState ?? 'unknown'}, cursor=${status.mediaCursor ?? 'null'}`);
+    }
+    await sleep(STATE_POLL_MS);
+    status = await obs.call('GetMediaInputStatus', { inputUuid: mediaId });
+  }
+  return status;
+}
 
 export class RangePlaybackManager {
   #obs;
@@ -42,8 +66,44 @@ export class RangePlaybackManager {
     }
 
     await this.cancel(mediaId, { pause: false });
+    let status = await this.#obs.call('GetMediaInputStatus', { inputUuid: mediaId });
+    if (!TIME_VALID_STATES.has(status.mediaState) || !Number.isFinite(status.mediaCursor)) {
+      await this.#obs.call('TriggerMediaInputAction', {
+        inputUuid: mediaId,
+        mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART',
+      });
+      status = await waitForStatus(
+        this.#obs,
+        mediaId,
+        (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
+        'media range restart',
+      );
+    }
+    if (status.mediaState === 'OBS_MEDIA_STATE_PLAYING') {
+      await this.#obs.call('TriggerMediaInputAction', { inputUuid: mediaId, mediaAction: PAUSE });
+      await waitForStatus(
+        this.#obs,
+        mediaId,
+        (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PAUSED',
+        'media range pause before seek',
+      );
+    }
     await this.#obs.call('SetMediaInputCursor', { inputUuid: mediaId, mediaCursor: startMs });
+    await waitForStatus(
+      this.#obs,
+      mediaId,
+      (status) => status.mediaState === 'OBS_MEDIA_STATE_PAUSED'
+        && Number.isFinite(status.mediaCursor)
+        && Math.abs(status.mediaCursor - startMs) <= SEEK_TOLERANCE_MS,
+      `media cursor near ${startMs}ms`,
+    );
     await this.#obs.call('TriggerMediaInputAction', { inputUuid: mediaId, mediaAction: PLAY });
+    await waitForStatus(
+      this.#obs,
+      mediaId,
+      (status) => status.mediaState === 'OBS_MEDIA_STATE_PLAYING',
+      'media range playback to start',
+    );
     const entry = {
       rangeId: randomUUID(),
       mediaId,
@@ -129,7 +189,21 @@ export class RangePlaybackManager {
       return;
     }
     await this.#obs.call('TriggerMediaInputAction', { inputUuid: entry.mediaId, mediaAction: PAUSE });
+    await waitForStatus(
+      this.#obs,
+      entry.mediaId,
+      (status) => status.mediaState === 'OBS_MEDIA_STATE_PAUSED',
+      'media range end pause',
+    );
     await this.#obs.call('SetMediaInputCursor', { inputUuid: entry.mediaId, mediaCursor: entry.endMs });
+    await waitForStatus(
+      this.#obs,
+      entry.mediaId,
+      (status) => status.mediaState === 'OBS_MEDIA_STATE_PAUSED'
+        && Number.isFinite(status.mediaCursor)
+        && Math.abs(status.mediaCursor - entry.endMs) <= SEEK_TOLERANCE_MS,
+      `media range end cursor near ${entry.endMs}ms`,
+    );
   }
 
   #publicEntry(entry) {

@@ -46,7 +46,7 @@ MCPクライアント側では、このNodeプロセスをstdioサーバーと�
 - `fit=stretch`: アスペクト比を無視して指定矩形へ伸縮する
 座標はOBSの既定と同じ左上基準です。
 ## 指定区間の再生
-`media_play_range`は任意の`speedPercent`を先に適用でき、その後`startMs`へseekして再生し、OBSが報告する実際の`mediaCursor`を既定50ms間隔で監視します。`endMs`へ到達すると、既定では一時停止して正確に`endMs`へseekします。再生開始直後の一時的な`STOPPED`/`NONE`状態で監視を誤終了しないよう起動猶予も持たせています。
+`media_play_range`は任意の`speedPercent`を先に適用できます。完全停止中のMedia Sourceは`RESTART`で初期化し、再生中ならいったん`PAUSE`完了を確認してから`startMs`へseekし、seek反映後に再生します。OBSが報告する実際の`mediaCursor`を既定50ms間隔で監視し、`endMs`へ到達すると、既定では一時停止の反映を待ってから正確に`endMs`へseekします。再生開始直後の一時的な`STOPPED`/`NONE`状態で監視を誤終了しないよう起動猶予も持たせています。
 ```text
 mediaId: <media_addが返したUUID>
 startMs: 12000
@@ -55,8 +55,8 @@ endAction: pause
 ```
 このツール自体は即座に返ります。区間終端の監視はMCPサーバープロセス内で継続します。手動操作へ切り替える場合は`media_range_cancel`を使います。`media_control`と`media_seek`を明示的に呼んだ場合も、そのmediaIdの区間監視は解除されます。
 ## 通常再生・速度・メディア情報
-通常再生には`media_play`を使えます。`startMs`を省略すると現在位置から、`speedPercent`を省略すると現在の速度のまま再生します。両方指定した場合はOBSのMedia Sourceへ速度設定を適用し、開始位置へseekしてから再生します。
-`media_speed_set`は1〜200の`speedPercent`を受け付けます。OBS本体のMedia Source実装では速度変更時にメディア再初期化が行われるため、区間再生監視は解除してから設定します。
+通常再生には`media_play`を使えます。完全停止中はOBSの`PLAY`では再開できないMedia Sourceがあるため内部で`RESTART`を使用します。`startMs`を指定した場合は、再生可能状態へ移行→一時停止完了→seek反映確認→再生の順で処理し、再生中seekで映像が黒く固まるMedia Sourceを避けます。`speedPercent`を同時指定した場合、開始位置が省略されていれば速度変更前のcursorを復元してから再生します。
+`media_speed_set`は1〜200の`speedPercent`を受け付けます。OBS本体のMedia Source実装では速度変更時にメディア再初期化が行われるため、変更前の再生/一時停止状態とcursorを保存し、速度変更後に明示的に再初期化してcursorを復元します。停止中だった入力は停止状態を維持します。
 `media_info`は、`mediaId`/`mediaName`、ローカルファイルまたはネットワークURL、Media Source設定、`mediaState`、`mediaDuration`、`mediaCursor`、`speedPercent`、loop/seekable、mute/volume、Program/UI表示状態、配置されている全シーンと各`sceneItemId`/transformをまとめて返します。
 ## サウンドミキサー
 `audio_mixer_list`は、OBSの`inputKindCaps`で音声対応している入力だけを列挙し、各入力について以下をまとめて返します。
@@ -75,7 +75,7 @@ Windows版OBSのGDI+文字ソースを専用ツールで扱えます。作成時
 - `text_set`: 文字内容/スタイルの変更と、位置/サイズ変更を同時に行う
 - `text_remove`: 文字入力そのものを削除し、その入力を使う全scene itemもOBS側で削除する
 
-文字スタイルは`fontName`, `fontStyle`, `fontSize`, `bold`, `italic`, `underline`, `strikeout`を指定できます。`textColor`, `backgroundColor`, `outlineColor`は`#RRGGBB`形式で、`textOpacity`, `backgroundOpacity`, `outlineOpacity`は0〜100です。アウトライン幅は`outlineSize`の1〜20、配置は`align=left|center|right`と`verticalAlign=top|center|bottom`を使います。
+文字スタイルは`fontName`, `fontStyle`, `fontSize`, `bold`, `italic`, `underline`, `strikeout`を指定できます。`textColor`, `backgroundColor`, `outlineColor`は`#RRGGBB`形式で、Windows GDI+文字ソースが内部設定で使うBGR整数へMCP側で変換します。`textOpacity`, `backgroundOpacity`, `outlineOpacity`は0〜100です。アウトライン幅は`outlineSize`の1〜20、配置は`align=left|center|right`と`verticalAlign=top|center|bottom`を使います。
 
 シーン上の配置は`x`, `y`, `width`, `height`, `fit`, `rotation`を同じ呼び出しで指定できます。`width`と`height`は対で指定し、`fit`は`contain` / `cover` / `stretch`です。`text_set`で配置変更する際、その文字ソースのscene itemが1個だけなら`textId`だけで自動解決します。同じ文字ソースが複数シーンまたは複数scene itemに置かれている場合は`sceneId`/`sceneName`を指定し、同一シーンに複数ある場合はさらに`sceneItemId`を指定します。
 
