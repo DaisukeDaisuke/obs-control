@@ -1,0 +1,6 @@
+[obs]
+url = "ws://127.0.0.1:4455"
+password = "change-me"
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+

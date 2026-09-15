@@ -1,13 +1,13 @@
 {
   "name": "obs-control-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Dependency-free Node.js MCP server for OBS Studio control over obs-websocket v5.",
   "type": "module",
   "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check src/obs-websocket-client.mjs && node --check src/range-playback.mjs && node --check src/tools.mjs",
+    "check": "node --check server.mjs && node --check src/config.mjs && node --check src/obs-websocket-client.mjs && node --check src/range-playback.mjs && node --check src/tools.mjs",
     "test": "node scripts/self-test.mjs"
   },
   "engines": {

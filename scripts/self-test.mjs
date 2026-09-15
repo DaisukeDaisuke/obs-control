@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from '../server.mjs';
+import { parseConfigToml } from '../src/config.mjs';
 import { RangePlaybackManager } from '../src/range-playback.mjs';
 import { ObsWebSocketClient } from '../src/obs-websocket-client.mjs';
 
@@ -41,7 +42,7 @@ class FakeObs {
             inputUuid: 'media-1',
             inputKind: 'ffmpeg_source',
             unversionedInputKind: 'ffmpeg_source',
-            inputKindCaps: 0,
+            inputKindCaps: 2,
           }],
         };
       case 'GetInputSettings':
@@ -61,6 +62,13 @@ class FakeObs {
       case 'OffsetMediaInputCursor':
       case 'TriggerMediaInputAction':
       case 'SetSceneItemTransform':
+      case 'SetInputMute':
+      case 'SetInputVolume':
+      case 'SetInputAudioBalance':
+      case 'SetInputAudioSyncOffset':
+      case 'SetInputAudioMonitorType':
+      case 'SetInputAudioTracks':
+      case 'ToggleInputMute':
         return {};
       case 'CreateInput':
         return { inputUuid: 'media-created', sceneItemId: 9 };
@@ -81,6 +89,14 @@ class FakeObs {
         return { inputMuted: false };
       case 'GetInputVolume':
         return { inputVolumeMul: 1, inputVolumeDb: 0 };
+      case 'GetInputAudioBalance':
+        return { inputAudioBalance: 0.5 };
+      case 'GetInputAudioSyncOffset':
+        return { inputAudioSyncOffset: 100 };
+      case 'GetInputAudioMonitorType':
+        return { monitorType: 'OBS_MONITORING_TYPE_NONE' };
+      case 'GetInputAudioTracks':
+        return { inputAudioTracks: { '1': true, '2': false, '3': false, '4': false, '5': false, '6': false } };
       case 'GetSourceActive':
         return { videoActive: true, videoShowing: true };
       case 'GetSceneList':
@@ -132,9 +148,19 @@ assert.equal(initialized.result.serverInfo.name, 'obs-control');
 
 const listed = await server.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
 const names = new Set(listed.result.tools.map((tool) => tool.name));
-for (const requiredTool of ['media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot']) {
+for (const requiredTool of ['media_play', 'media_speed_set', 'media_info', 'media_play_range', 'screenshot', 'audio_mixer_list', 'audio_mixer_get', 'audio_mixer_set', 'audio_mixer_mute_toggle']) {
   assert(names.has(requiredTool), `missing tool ${requiredTool}`);
 }
+
+const parsedConfig = parseConfigToml(`
+[obs]
+url = "ws://127.0.0.1:4455"
+password = "p#ssword"
+connect_timeout_ms = 6000
+request_timeout_ms = 12000
+`);
+assert.equal(parsedConfig.obs.password, 'p#ssword');
+assert.equal(parsedConfig.obs.connect_timeout_ms, 6000);
 
 fake.calls.length = 0;
 const played = await server.handle({
@@ -174,6 +200,45 @@ assert.equal(mediaInfo.placements.length, 1);
 assert.equal(mediaInfo.placements[0].sceneItemId, 7);
 assert.equal(mediaInfo.video.sourceWidth, 1920);
 assert.equal(mediaInfo.video.sourceHeight, 1080);
+
+fake.calls.length = 0;
+const mixerList = await server.handle({
+  jsonrpc: '2.0',
+  id: 40,
+  method: 'tools/call',
+  params: { name: 'audio_mixer_list', arguments: {} },
+});
+assert.equal(mixerList.result.isError, false, JSON.stringify(mixerList.result.structuredContent));
+assert.equal(mixerList.result.structuredContent.result.inputs.length, 1);
+assert.equal(mixerList.result.structuredContent.result.inputs[0].inputId, 'media-1');
+assert.equal(mixerList.result.structuredContent.result.inputs[0].balance, 0.5);
+assert.equal(mixerList.result.structuredContent.result.inputs[0].syncOffsetMs, 100);
+
+fake.calls.length = 0;
+const mixerSet = await server.handle({
+  jsonrpc: '2.0',
+  id: 401,
+  method: 'tools/call',
+  params: {
+    name: 'audio_mixer_set',
+    arguments: {
+      inputId: 'media-1',
+      muted: true,
+      volumeDb: -6,
+      balance: 0.25,
+      syncOffsetMs: 250,
+      monitorType: 'monitor_and_output',
+      tracks: { '1': true, '2': true },
+    },
+  },
+});
+assert.equal(mixerSet.result.isError, false);
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputMute' && entry.requestData.inputMuted === true));
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputVolume' && entry.requestData.inputVolumeDb === -6));
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioBalance' && entry.requestData.inputAudioBalance === 0.25));
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioSyncOffset' && entry.requestData.inputAudioSyncOffset === 250));
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioMonitorType' && entry.requestData.monitorType === 'OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT'));
+assert(fake.calls.some((entry) => entry.requestType === 'SetInputAudioTracks' && entry.requestData.inputAudioTracks['2'] === true));
 
 fake.calls.length = 0;
 const speedSet = await server.handle({
@@ -365,4 +430,4 @@ try {
 }
 
 await server.close();
-process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);
+process.stdout.write(`${JSON.stringify({ ok: true, toolCount: names.size, tests: ['config-toml', 'audio-mixer', 'media_play', 'media_speed_set', 'media_info', 'media_add-placement', 'media_play_range-speed', 'screenshot-image-content', 'range-playback', 'obs-websocket-v5-auth-request'] })}\n`);

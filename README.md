@@ -7,6 +7,7 @@ Node.js 22+だけで動作する、OBS Studio / obs-websocket v5向けのstdio M
 - `media_speed_set`で既存Media Sourceの再生速度を変更する
 - `media_info`でソース、再生状態、速度、音声、表示状態、全シーン配置をまとめて取得する
 - `media_play_range`で`startMs`から`endMs`までの指定区間だけを再生する
+- OBSサウンドミキサーの音量/mute/バランス/同期/モニタリング/トラック割当を取得・変更する
 - シーン/入力/シーンアイテムを作成・列挙・削除・配置・表示切替する
 - OBSのシーンまたは入力をスクリーンショットし、MCPの`image` contentとしてAIへ直接返す
 ## IDの扱い
@@ -16,12 +17,21 @@ Node.js 22+だけで動作する、OBS Studio / obs-websocket v5向けのstdio M
 - `sceneItemId` = OBSのシーン内数値ID
 そのためMCPプロセスを再起動しても、OBS側の実体が残っている限り同じUUIDを再利用できます。
 ## 必要条件
-OBS StudioでWebSocketサーバーを有効にしてください。obs-websocket v5の標準ポートは`4455`です。
+OBS StudioでWebSocketサーバーを有効にしてください。obs-websocket v5の標準ポートは`4455`です。既定では`server.mjs`と同じディレクトリの`config.toml`を読みます。
+```toml
+[obs]
+url = "ws://127.0.0.1:4455"
+password = "OBSで設定したパスワード"
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+```
+`config.toml`はパスワードを含められるため`.gitignore`対象です。配布用の雛形は`config.example.toml`です。別ファイルを使う場合は`OBS_MCP_CONFIG`でパスを指定できます。
+従来どおり環境変数も利用でき、同じ項目が両方にある場合は環境変数が優先されます。
 ```text
 OBS_WEBSOCKET_URL=ws://127.0.0.1:4455
 OBS_WEBSOCKET_PASSWORD=<OBSで設定したパスワード>
 ```
-認証を無効にしている場合、`OBS_WEBSOCKET_PASSWORD`は不要です。パスワードはコマンドライン引数ではなく環境変数で渡します。
+認証を無効にしている場合、パスワードは空文字のままで構いません。パスワードをコマンドライン引数へ出す必要はありません。
 ## 起動
 ```text
 node C:\Users\owner\Documents\tunnelworkspace\obs\obs-control\server.mjs
@@ -47,6 +57,15 @@ endAction: pause
 通常再生には`media_play`を使えます。`startMs`を省略すると現在位置から、`speedPercent`を省略すると現在の速度のまま再生します。両方指定した場合はOBSのMedia Sourceへ速度設定を適用し、開始位置へseekしてから再生します。
 `media_speed_set`は1〜200の`speedPercent`を受け付けます。OBS本体のMedia Source実装では速度変更時にメディア再初期化が行われるため、区間再生監視は解除してから設定します。
 `media_info`は、`mediaId`/`mediaName`、ローカルファイルまたはネットワークURL、Media Source設定、`mediaState`、`mediaDuration`、`mediaCursor`、`speedPercent`、loop/seekable、mute/volume、Program/UI表示状態、配置されている全シーンと各`sceneItemId`/transformをまとめて返します。
+## サウンドミキサー
+`audio_mixer_list`は、OBSの`inputKindCaps`で音声対応している入力だけを列挙し、各入力について以下をまとめて返します。
+- mute、dB/multiplier音量
+- 左右バランス（`0.0`=左、`0.5`=中央、`1.0`=右）
+- 音声同期オフセット（ms）
+- モニタリング種別
+- 音声トラック1〜6の出力割当
+`audio_mixer_get`は1入力の完全なミキサー状態を取得します。`audio_mixer_set`では必要な項目だけを指定して変更でき、`monitorType`は`none` / `monitor_only` / `monitor_and_output`を受け付けます。`tracks`は`{"1":true,"2":false}`のような部分更新が可能です。`audio_mixer_mute_toggle`はmuteを反転します。
+既存の`input_audio_get` / `input_audio_set`はmuteとvolumeだけを素早く扱う簡易APIとして残しています。
 ## スクリーンショット
 `screenshot`はOBSの`GetSourceScreenshot`を使います。`sourceId`/`sourceName`を省略すると現在のProgramシーンを撮ります。既定はPNG、最大1280x720です。
 返り値にはメタデータ用text contentに加えて、次のMCP image contentが含まれます。
@@ -55,10 +74,11 @@ endAction: pause
 ```
 したがってAIは別のファイル読み取りMCPを経由せず、そのツール結果の画像を直接視覚入力として扱えます。画像はPNG/JPEG/WebPの実バイトを検査し、既定8 MiBを超える結果は拒否します。
 ## 実装済みツール
-`obs_status`, `scene_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_item_list`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `input_list`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
+`obs_status`, `scene_list`, `scene_create`, `scene_delete`, `scene_set_current`, `scene_item_list`, `scene_item_remove`, `scene_item_transform_get`, `scene_item_transform_set`, `scene_item_enabled_set`, `scene_item_index_set`, `input_list`, `input_settings_get`, `input_settings_set`, `input_audio_get`, `input_audio_set`, `audio_mixer_list`, `audio_mixer_get`, `audio_mixer_set`, `audio_mixer_mute_toggle`, `media_list`, `media_add`, `media_remove`, `media_status`, `media_info`, `media_play`, `media_speed_set`, `media_control`, `media_seek`, `media_play_range`, `media_range_cancel`, `screenshot`。
 ## 構文確認
 ```text
 node --check server.mjs
+node --check src/config.mjs
 node --check src/obs-websocket-client.mjs
 node --check src/range-playback.mjs
 node --check src/tools.mjs

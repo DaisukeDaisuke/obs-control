@@ -98,6 +98,31 @@ export const TOOL_SCHEMAS = [
     volumeDb: { type: 'number', minimum: -100, maximum: 26 },
     volumeMul: { type: 'number', minimum: 0, maximum: 20 },
   }),
+  schema('audio_mixer_list', 'List audio mixer', 'List all OBS inputs that support audio, including volume, mute, balance, sync offset, monitoring mode, and track routing.', {}, [], READ_ONLY),
+  schema('audio_mixer_get', 'Get audio mixer input', 'Get the complete OBS mixer state for one audio-capable input.', INPUT_SELECTOR, [], READ_ONLY),
+  schema('audio_mixer_set', 'Set audio mixer input', 'Change one or more OBS mixer properties: volume, mute, stereo balance, sync offset, monitoring mode, and output track routing.', {
+    ...INPUT_SELECTOR,
+    muted: { type: 'boolean' },
+    volumeDb: { type: 'number', minimum: -100, maximum: 26 },
+    volumeMul: { type: 'number', minimum: 0, maximum: 20 },
+    balance: { type: 'number', minimum: 0, maximum: 1, description: '0.0=left, 0.5=center, 1.0=right.' },
+    syncOffsetMs: { type: 'integer', minimum: -950, maximum: 20000 },
+    monitorType: { type: 'string', enum: ['none', 'monitor_only', 'monitor_and_output'] },
+    tracks: {
+      type: 'object',
+      description: 'Partial audio track routing object. Keys are "1" through "6" and values are booleans.',
+      properties: {
+        '1': { type: 'boolean' },
+        '2': { type: 'boolean' },
+        '3': { type: 'boolean' },
+        '4': { type: 'boolean' },
+        '5': { type: 'boolean' },
+        '6': { type: 'boolean' },
+      },
+      additionalProperties: false,
+    },
+  }),
+  schema('audio_mixer_mute_toggle', 'Toggle audio mixer mute', 'Toggle mute for one OBS audio input and return its complete mixer state.', INPUT_SELECTOR),
   schema('media_list', 'List media', 'List Media Source (ffmpeg_source) inputs. mediaId is the persistent OBS input UUID.', {
     includeSettings: { type: 'boolean', default: false },
   }, [], READ_ONLY),
@@ -175,6 +200,12 @@ const FIT_BOUNDS = {
   stretch: 'OBS_BOUNDS_STRETCH',
 };
 const TOP_LEFT_ALIGNMENT = 5; // OBS_ALIGN_LEFT (1) | OBS_ALIGN_TOP (4)
+const OBS_SOURCE_AUDIO_CAP = 1 << 1;
+const MONITOR_TYPES = {
+  none: 'OBS_MONITORING_TYPE_NONE',
+  monitor_only: 'OBS_MONITORING_TYPE_MONITOR_ONLY',
+  monitor_and_output: 'OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT',
+};
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 function positiveIntegerEnv(name, fallback) {
@@ -265,6 +296,14 @@ function inputSelector(args) {
   return selector(args, 'inputId', 'inputName', 'inputUuid', 'inputName', 'input');
 }
 
+async function resolveInputReference(obs, args) {
+  const ref = inputSelector(args);
+  const data = await obs.call('GetInputList', {});
+  const found = (data.inputs ?? []).find((item) => ref.inputUuid ? item.inputUuid === ref.inputUuid : item.inputName === ref.inputName);
+  if (!found) throw new Error(`OBS input not found: ${ref.inputUuid ?? ref.inputName}`);
+  return { ref: { inputUuid: found.inputUuid }, input: found };
+}
+
 function mediaSelector(args) {
   return selector(args, 'mediaId', 'mediaName', 'inputUuid', 'inputName', 'media');
 }
@@ -295,6 +334,43 @@ function normalizedInput(input) {
     inputKind: input.inputKind,
     unversionedInputKind: input.unversionedInputKind,
     inputKindCaps: input.inputKindCaps,
+  };
+}
+
+function audioTracks(args) {
+  const value = args.tracks;
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('tracks must be an object');
+  const result = {};
+  for (const [key, enabled] of Object.entries(value)) {
+    if (!/^[1-6]$/.test(key)) throw new Error('tracks keys must be from "1" through "6"');
+    if (typeof enabled !== 'boolean') throw new Error(`tracks.${key} must be boolean`);
+    result[key] = enabled;
+  }
+  if (Object.keys(result).length === 0) throw new Error('tracks must contain at least one track');
+  return result;
+}
+
+async function getAudioMixerState(obs, ref, input = {}) {
+  const [mute, volume, balance, syncOffset, monitor, tracks] = await Promise.all([
+    obs.call('GetInputMute', ref),
+    obs.call('GetInputVolume', ref),
+    obs.call('GetInputAudioBalance', ref),
+    obs.call('GetInputAudioSyncOffset', ref),
+    obs.call('GetInputAudioMonitorType', ref),
+    obs.call('GetInputAudioTracks', ref),
+  ]);
+  return {
+    inputId: input.inputUuid ?? ref.inputUuid ?? null,
+    inputName: input.inputName ?? ref.inputName ?? null,
+    inputKind: input.inputKind ?? null,
+    muted: mute.inputMuted,
+    volumeDb: volume.inputVolumeDb,
+    volumeMul: volume.inputVolumeMul,
+    balance: balance.inputAudioBalance,
+    syncOffsetMs: syncOffset.inputAudioSyncOffset,
+    monitorType: monitor.monitorType,
+    tracks: tracks.inputAudioTracks,
   };
 }
 
@@ -543,6 +619,61 @@ export function createToolHandler({ obs, ranges }) {
         if (volumeMul !== undefined) await obs.call('SetInputVolume', { ...ref, inputVolumeMul: volumeMul });
         const [mute, volume] = await Promise.all([obs.call('GetInputMute', ref), obs.call('GetInputVolume', ref)]);
         return okResult({ ...ref, muted: mute.inputMuted, volumeDb: volume.inputVolumeDb, volumeMul: volume.inputVolumeMul });
+      }
+      case 'audio_mixer_list': {
+        const data = await obs.call('GetInputList', {});
+        const audioInputs = (data.inputs ?? []).filter((input) => (input.inputKindCaps & OBS_SOURCE_AUDIO_CAP) !== 0);
+        const inputs = await Promise.all(audioInputs.map((input) => getAudioMixerState(obs, { inputUuid: input.inputUuid }, input)));
+        return okResult({ inputs });
+      }
+      case 'audio_mixer_get': {
+        const resolved = await resolveInputReference(obs, args);
+        if ((resolved.input.inputKindCaps & OBS_SOURCE_AUDIO_CAP) === 0) {
+          throw new Error(`Input does not support audio: ${resolved.input.inputName}`);
+        }
+        return okResult(await getAudioMixerState(obs, resolved.ref, resolved.input));
+      }
+      case 'audio_mixer_set': {
+        const resolved = await resolveInputReference(obs, args);
+        if ((resolved.input.inputKindCaps & OBS_SOURCE_AUDIO_CAP) === 0) {
+          throw new Error(`Input does not support audio: ${resolved.input.inputName}`);
+        }
+        const muted = optionalBoolean(args, 'muted');
+        const volumeDb = optionalNumber(args, 'volumeDb');
+        const volumeMul = optionalNumber(args, 'volumeMul');
+        const balance = optionalNumber(args, 'balance');
+        const syncOffsetMs = optionalInteger(args, 'syncOffsetMs');
+        const monitorType = enumValue(args, 'monitorType', Object.keys(MONITOR_TYPES));
+        const tracks = audioTracks(args);
+        if (
+          muted === undefined && volumeDb === undefined && volumeMul === undefined && balance === undefined
+          && syncOffsetMs === undefined && monitorType === undefined && tracks === undefined
+        ) {
+          throw new Error('Provide at least one mixer property to change');
+        }
+        if (volumeDb !== undefined && volumeMul !== undefined) throw new Error('Specify only one of volumeDb or volumeMul');
+        if (volumeDb !== undefined && (volumeDb < -100 || volumeDb > 26)) throw new Error('volumeDb must be from -100 through 26');
+        if (volumeMul !== undefined && (volumeMul < 0 || volumeMul > 20)) throw new Error('volumeMul must be from 0 through 20');
+        if (balance !== undefined && (balance < 0 || balance > 1)) throw new Error('balance must be from 0 through 1');
+        if (syncOffsetMs !== undefined && (syncOffsetMs < -950 || syncOffsetMs > 20000)) {
+          throw new Error('syncOffsetMs must be from -950 through 20000');
+        }
+        if (muted !== undefined) await obs.call('SetInputMute', { ...resolved.ref, inputMuted: muted });
+        if (volumeDb !== undefined) await obs.call('SetInputVolume', { ...resolved.ref, inputVolumeDb: volumeDb });
+        if (volumeMul !== undefined) await obs.call('SetInputVolume', { ...resolved.ref, inputVolumeMul: volumeMul });
+        if (balance !== undefined) await obs.call('SetInputAudioBalance', { ...resolved.ref, inputAudioBalance: balance });
+        if (syncOffsetMs !== undefined) await obs.call('SetInputAudioSyncOffset', { ...resolved.ref, inputAudioSyncOffset: syncOffsetMs });
+        if (monitorType !== undefined) await obs.call('SetInputAudioMonitorType', { ...resolved.ref, monitorType: MONITOR_TYPES[monitorType] });
+        if (tracks !== undefined) await obs.call('SetInputAudioTracks', { ...resolved.ref, inputAudioTracks: tracks });
+        return okResult(await getAudioMixerState(obs, resolved.ref, resolved.input));
+      }
+      case 'audio_mixer_mute_toggle': {
+        const resolved = await resolveInputReference(obs, args);
+        if ((resolved.input.inputKindCaps & OBS_SOURCE_AUDIO_CAP) === 0) {
+          throw new Error(`Input does not support audio: ${resolved.input.inputName}`);
+        }
+        await obs.call('ToggleInputMute', resolved.ref);
+        return okResult(await getAudioMixerState(obs, resolved.ref, resolved.input));
       }
       case 'media_list': {
         const includeSettings = optionalBoolean(args, 'includeSettings', false);

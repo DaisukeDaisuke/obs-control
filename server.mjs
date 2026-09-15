@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { loadServerConfig } from './src/config.mjs';
 import { ObsWebSocketClient } from './src/obs-websocket-client.mjs';
 import { RangePlaybackManager } from './src/range-playback.mjs';
 import { TOOL_SCHEMAS, createToolHandler, errorResult } from './src/tools.mjs';
@@ -11,8 +12,9 @@ export const HELP = `OBS Control MCP
 Usage:
   node server.mjs
 Environment:
+  OBS_MCP_CONFIG                    TOML config path (default ./config.toml beside server.mjs)
   OBS_WEBSOCKET_URL                 WebSocket URL (default ws://127.0.0.1:4455)
-  OBS_WEBSOCKET_PASSWORD            OBS WebSocket password when authentication is enabled
+  OBS_WEBSOCKET_PASSWORD            OBS WebSocket password; overrides config.toml
   OBS_WEBSOCKET_CONNECT_TIMEOUT_MS  Connect timeout (default 5000)
   OBS_WEBSOCKET_REQUEST_TIMEOUT_MS  Per-request timeout (default 10000)
   OBS_MCP_MAX_IMAGE_BYTES           Maximum screenshot bytes returned to MCP (default 8388608)
@@ -38,7 +40,7 @@ export function createServer({ obs = new ObsWebSocketClient() } = {}) {
       return response(request.id, {
         protocolVersion: request.params?.protocolVersion ?? '2026-07-28',
         capabilities: { tools: {} },
-        serverInfo: { name: 'obs-control', version: '0.1.0' },
+        serverInfo: { name: 'obs-control', version: '0.2.0' },
         instructions: 'Control OBS Studio over obs-websocket v5. Persistent identifiers are native OBS UUIDs: sceneId is sceneUuid and mediaId/inputId is inputUuid. The screenshot tool returns actual MCP image content for vision. media_play_range enforces an end cursor asynchronously while the MCP server remains alive.',
       });
     }
@@ -66,7 +68,8 @@ export function createServer({ obs = new ObsWebSocketClient() } = {}) {
 }
 
 export async function startStdio(input = process.stdin, output = process.stdout) {
-  const server = createServer();
+  const config = await loadServerConfig();
+  const server = createServer({ obs: new ObsWebSocketClient(config.obs) });
   let buffer = '';
   let closing = false;
 

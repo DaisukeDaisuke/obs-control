@@ -176,7 +176,7 @@ export class ObsWebSocketClient {
     const identify = { rpcVersion: 1, eventSubscriptions: 0 };
     if (hello.authentication) {
       if (!this.#password) {
-        this.#failConnect(new Error('OBS WebSocket requires a password. Set OBS_WEBSOCKET_PASSWORD.'));
+        this.#failConnect(new Error('OBS WebSocket requires a password. Set [obs].password in config.toml or OBS_WEBSOCKET_PASSWORD.'));
         try {
           this.#socket?.close();
         } catch {
