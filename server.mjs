@@ -40,7 +40,7 @@ export function createServer({ obs = new ObsWebSocketClient() } = {}) {
       return response(request.id, {
         protocolVersion: request.params?.protocolVersion ?? '2026-07-28',
         capabilities: { tools: {} },
-        serverInfo: { name: 'obs-control', version: '0.3.1' },
+        serverInfo: { name: 'obs-control', version: '0.3.2' },
         instructions: 'Control OBS Studio over obs-websocket v5. Persistent identifiers are native OBS UUIDs: sceneId is sceneUuid and mediaId/textId/inputId is inputUuid. The screenshot tool returns actual MCP image content for vision. media_play_range enforces an end cursor asynchronously while the MCP server remains alive.',
       });
     }

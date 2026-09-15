@@ -46,7 +46,7 @@ MCPクライアント側では、このNodeプロセスをstdioサーバーと�
 - `fit=stretch`: アスペクト比を無視して指定矩形へ伸縮する
 座標はOBSの既定と同じ左上基準です。
 ## 指定区間の再生
-`media_play_range`は任意の`speedPercent`を先に適用できます。完全停止中のMedia Sourceは`RESTART`で初期化し、再生中ならいったん`PAUSE`完了を確認してから`startMs`へseekし、seek反映後に再生します。OBSが報告する実際の`mediaCursor`を既定50ms間隔で監視し、`endMs`へ到達すると、既定では一時停止の反映を待ってから正確に`endMs`へseekします。再生開始直後の一時的な`STOPPED`/`NONE`状態で監視を誤終了しないよう起動猶予も持たせています。
+`media_play_range`は任意の`speedPercent`を先に適用できます。完全停止中のMedia Sourceは`RESTART`で初期化し、再生中ならいったん`PAUSE`完了を確認してから`startMs`へseekし、seek反映後に再生します。OBS/FFmpegが指定時刻ではなく近傍キーフレームへseekする形式では、安定した着地点が指定値から5秒以内なら正常なseekとして扱い、実際の着地点を`actualStartMs`で返します。OBSが報告する実際の`mediaCursor`を既定50ms間隔で監視し、`endMs`へ到達すると、既定ではその直後に一時停止します。終了後に`endMs`へ再seekしてキーフレーム位置まで巻き戻すことはしません。再生開始直後の一時的な`STOPPED`/`NONE`状態で監視を誤終了しないよう起動猶予も持たせています。
 ```text
 mediaId: <media_addが返したUUID>
 startMs: 12000

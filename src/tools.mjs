@@ -214,7 +214,7 @@ export const TOOL_SCHEMAS = [
     mode: { type: 'string', enum: ['absolute', 'relative'], default: 'absolute' },
     milliseconds: { type: 'number' },
   }, ['milliseconds']),
-  schema('media_play_range', 'Play media range', 'Play only a specified [startMs,endMs] range. Returns immediately while the server watches the real OBS media cursor; at end it pauses on the exact end frame by default or stops.', {
+  schema('media_play_range', 'Play media range', 'Play only a specified [startMs,endMs] range. Returns immediately while the server watches the real OBS media cursor; at end it pauses as soon as OBS reports the cursor at/after endMs, or stops.', {
     ...MEDIA_SELECTOR,
     startMs: { type: 'number', minimum: 0 },
     endMs: { type: 'number', exclusiveMinimum: 0 },
@@ -254,6 +254,11 @@ const MEDIA_TERMINAL_STATES = new Set([
 const MEDIA_STATE_SETTLE_TIMEOUT_MS = 2000;
 const MEDIA_STATE_POLL_MS = 25;
 const MEDIA_SEEK_TOLERANCE_MS = 1500;
+const MEDIA_SEEK_SNAP_TOLERANCE_MS = 5000;
+const MEDIA_SEEK_STABLE_DELTA_MS = 50;
+const MEDIA_SEEK_STABLE_POLLS = 2;
+const MEDIA_RESUME_BACKTRACK_TOLERANCE_MS = 1500;
+const MEDIA_RESUME_VERIFY_DELAY_MS = 75;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -278,14 +283,77 @@ async function waitForMediaStatus(obs, ref, predicate, {
 
 async function waitForMediaCursor(obs, ref, targetMs, options = {}) {
   const toleranceMs = options.toleranceMs ?? MEDIA_SEEK_TOLERANCE_MS;
-  return waitForMediaStatus(
-    obs,
-    ref,
-    (status) => MEDIA_TIME_VALID_STATES.has(status.mediaState)
-      && Number.isFinite(status.mediaCursor)
-      && Math.abs(status.mediaCursor - targetMs) <= toleranceMs,
-    { ...options, description: options.description ?? `media cursor near ${targetMs}ms` },
-  );
+  const snapToleranceMs = options.snapToleranceMs ?? MEDIA_SEEK_SNAP_TOLERANCE_MS;
+  const timeoutMs = options.timeoutMs ?? MEDIA_STATE_SETTLE_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? MEDIA_STATE_POLL_MS;
+  const description = options.description ?? `media cursor near ${targetMs}ms`;
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = await obs.call('GetMediaInputStatus', ref);
+  let previousCursor = null;
+  let stablePolls = 0;
+
+  while (true) {
+    if (MEDIA_TIME_VALID_STATES.has(lastStatus.mediaState) && Number.isFinite(lastStatus.mediaCursor)) {
+      const distance = Math.abs(lastStatus.mediaCursor - targetMs);
+      if (distance <= toleranceMs) return lastStatus;
+
+      // OBS/FFmpeg may legally land on the nearest keyframe rather than the
+      // requested timestamp. A stable paused cursor within a small keyframe
+      // window is a successful seek, not a timeout.
+      if (lastStatus.mediaState === 'OBS_MEDIA_STATE_PAUSED' && distance <= snapToleranceMs) {
+        if (previousCursor !== null && Math.abs(lastStatus.mediaCursor - previousCursor) <= MEDIA_SEEK_STABLE_DELTA_MS) {
+          stablePolls += 1;
+        } else {
+          stablePolls = 0;
+        }
+        if (stablePolls >= MEDIA_SEEK_STABLE_POLLS) return lastStatus;
+      } else {
+        stablePolls = 0;
+      }
+      previousCursor = lastStatus.mediaCursor;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${description}; last state=${lastStatus.mediaState ?? 'unknown'}, cursor=${lastStatus.mediaCursor ?? 'null'}`);
+    }
+    await sleep(pollIntervalMs);
+    lastStatus = await obs.call('GetMediaInputStatus', ref);
+  }
+}
+
+async function resumeMediaAtCursor(obs, ref, expectedCursor, description = 'media resume') {
+  await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.play });
+  let status = await waitForMediaStatus(obs, ref,
+    (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
+    { description });
+
+  // A speed change can make OBS report PAUSED at the restored cursor while
+  // FFmpeg still has a deferred reinitialization pending. The first PLAY then
+  // jumps back near zero. Verify once after PLAY and repair that backtrack.
+  if (Number.isFinite(expectedCursor)) {
+    await sleep(MEDIA_RESUME_VERIFY_DELAY_MS);
+    const verified = await obs.call('GetMediaInputStatus', ref);
+    if (verified.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(verified.mediaCursor)) status = verified;
+    if (Number.isFinite(status.mediaCursor)
+        && status.mediaCursor < expectedCursor - MEDIA_RESUME_BACKTRACK_TOLERANCE_MS) {
+      await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.pause });
+      await waitForMediaStatus(obs, ref,
+        (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PAUSED',
+        { description: `${description} correction pause` });
+      await obs.call('SetMediaInputCursor', { ...ref, mediaCursor: expectedCursor });
+      const correctedSeek = await waitForMediaCursor(obs, ref, expectedCursor, {
+        description: `${description} correction seek`,
+      });
+      await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.play });
+      status = await waitForMediaStatus(obs, ref,
+        (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
+        { description: `${description} correction play` });
+      if (status.mediaCursor < correctedSeek.mediaCursor - MEDIA_RESUME_BACKTRACK_TOLERANCE_MS) {
+        throw new Error(`Media resume lost its cursor after correction; expected near ${correctedSeek.mediaCursor}ms, got ${status.mediaCursor}ms`);
+      }
+    }
+  }
+  return status;
 }
 const FIT_BOUNDS = {
   contain: 'OBS_BOUNDS_SCALE_INNER',
@@ -1245,10 +1313,7 @@ export function createToolHandler({ obs, ranges }) {
           status = await waitForMediaCursor(obs, ref, desiredCursor);
         }
         if (status.mediaState === 'OBS_MEDIA_STATE_PAUSED') {
-          await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.play });
-          status = await waitForMediaStatus(obs, ref,
-            (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
-            { description: 'media playback to start' });
+          status = await resumeMediaAtCursor(obs, ref, status.mediaCursor, 'media playback to start');
         }
         const settings = await obs.call('GetInputSettings', ref);
         return okResult({ mediaId, speedPercent: settings.inputSettings?.speed_percent ?? 100, ...status });
@@ -1275,10 +1340,7 @@ export function createToolHandler({ obs, ranges }) {
           await obs.call('SetMediaInputCursor', { ...ref, mediaCursor: before.mediaCursor });
           status = await waitForMediaCursor(obs, ref, before.mediaCursor);
           if (before.mediaState === 'OBS_MEDIA_STATE_PLAYING') {
-            await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.play });
-            status = await waitForMediaStatus(obs, ref,
-              (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
-              { description: 'media resume after speed change' });
+            status = await resumeMediaAtCursor(obs, ref, status.mediaCursor, 'media resume after speed change');
           }
         } else {
           await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.stop });
@@ -1297,13 +1359,14 @@ export function createToolHandler({ obs, ranges }) {
         await ranges.cancel(mediaId, { pause: false });
         let status = await obs.call('GetMediaInputStatus', ref);
         if (action === 'play') {
-          const requestAction = MEDIA_TIME_VALID_STATES.has(status.mediaState)
-            ? MEDIA_ACTIONS.play
-            : MEDIA_ACTIONS.restart;
-          await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: requestAction });
-          status = await waitForMediaStatus(obs, ref,
-            (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
-            { description: 'media play' });
+          if (MEDIA_TIME_VALID_STATES.has(status.mediaState) && Number.isFinite(status.mediaCursor)) {
+            status = await resumeMediaAtCursor(obs, ref, status.mediaCursor, 'media play');
+          } else {
+            await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.restart });
+            status = await waitForMediaStatus(obs, ref,
+              (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
+              { description: 'media play restart' });
+          }
         } else if (action === 'restart') {
           await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.restart });
           status = await waitForMediaStatus(obs, ref,
@@ -1354,10 +1417,7 @@ export function createToolHandler({ obs, ranges }) {
         }
         let status = await waitForMediaCursor(obs, ref, targetMs);
         if (resumeAfterSeek) {
-          await obs.call('TriggerMediaInputAction', { ...ref, mediaAction: MEDIA_ACTIONS.play });
-          status = await waitForMediaStatus(obs, ref,
-            (candidate) => candidate.mediaState === 'OBS_MEDIA_STATE_PLAYING' && Number.isFinite(candidate.mediaCursor),
-            { description: 'media resume after seek' });
+          status = await resumeMediaAtCursor(obs, ref, status.mediaCursor, 'media resume after seek');
         }
         return okResult({ mediaId, mediaName: resolved.mediaName, ...status });
       }

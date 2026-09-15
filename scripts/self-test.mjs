@@ -14,6 +14,8 @@ class FakeObs {
   mediaCursor = null;
   mediaDuration = 30000;
   mediaSpeedPercent = 100;
+  seekSnapMs = 0;
+  resetOnNextPlay = false;
   textSettings = {
     text: 'Hello',
     font: { face: 'Arial', style: 'Regular', size: 48, flags: 1 },
@@ -117,7 +119,7 @@ class FakeObs {
         if (!['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState)) {
           throw new Error('The media input must be playing or paused in order to set the cursor position.');
         }
-        this.mediaCursor = requestData.mediaCursor;
+        this.mediaCursor = Math.max(0, requestData.mediaCursor - this.seekSnapMs);
         return {};
       case 'OffsetMediaInputCursor':
         if (!['OBS_MEDIA_STATE_PLAYING', 'OBS_MEDIA_STATE_PAUSED'].includes(this.mediaState)) {
@@ -129,7 +131,12 @@ class FakeObs {
         switch (requestData.mediaAction) {
           case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY':
             this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
-            this.mediaCursor ??= 0;
+            if (this.resetOnNextPlay) {
+              this.mediaCursor = 0;
+              this.resetOnNextPlay = false;
+            } else {
+              this.mediaCursor ??= 0;
+            }
             break;
           case 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE':
             if (this.mediaState === 'OBS_MEDIA_STATE_PLAYING') this.mediaState = 'OBS_MEDIA_STATE_PAUSED';
@@ -288,6 +295,7 @@ assert.equal(parsedConfig.obs.password, 'p#ssword');
 assert.equal(parsedConfig.obs.connect_timeout_ms, 6000);
 
 fake.calls.length = 0;
+fake.seekSnapMs = 3600;
 const played = await server.handle({
   jsonrpc: '2.0',
   id: 3,
@@ -299,27 +307,25 @@ const played = await server.handle({
 });
 assert.equal(played.result.isError, false, JSON.stringify(played.result.structuredContent));
 assert.equal(played.result.structuredContent.result.mediaId, 'media-1');
-assert.deepEqual(fake.calls.slice(0, 12).map((entry) => entry.requestType), [
+const mediaPlayCalls = fake.calls.filter((entry) => entry.requestType !== 'GetMediaInputStatus');
+assert.deepEqual(mediaPlayCalls.map((entry) => entry.requestType), [
   'GetInputList',
-  'GetMediaInputStatus',
   'SetInputSettings',
   'TriggerMediaInputAction',
-  'GetMediaInputStatus',
   'TriggerMediaInputAction',
-  'GetMediaInputStatus',
   'SetMediaInputCursor',
-  'GetMediaInputStatus',
   'TriggerMediaInputAction',
-  'GetMediaInputStatus',
   'GetInputSettings',
 ]);
-assert.equal(fake.calls[2].requestData.inputSettings.speed_percent, 150);
-assert.equal(fake.calls[3].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART');
-assert.equal(fake.calls[5].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE');
-assert.equal(fake.calls[7].requestData.mediaCursor, 12000);
-assert.equal(fake.calls[9].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY');
+assert.equal(mediaPlayCalls[1].requestData.inputSettings.speed_percent, 150);
+assert.equal(mediaPlayCalls[2].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART');
+assert.equal(mediaPlayCalls[3].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE');
+assert.equal(mediaPlayCalls[4].requestData.mediaCursor, 12000);
+assert.equal(mediaPlayCalls[5].requestData.mediaAction, 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY');
 assert.equal(fake.mediaState, 'OBS_MEDIA_STATE_PLAYING');
-assert.equal(fake.mediaCursor, 12000);
+assert.equal(fake.mediaCursor, 8400);
+assert.equal(played.result.structuredContent.result.mediaCursor, 8400);
+fake.seekSnapMs = 0;
 
 fake.calls.length = 0;
 const info = await server.handle({
@@ -505,7 +511,22 @@ assert.equal(speedSet.result.isError, false);
 assert(fake.calls.some((entry) => entry.requestType === 'SetInputSettings' && entry.requestData.inputSettings.speed_percent === 80));
 assert.equal(speedSet.result.structuredContent.result.speedPercent, 80);
 assert.equal(fake.mediaState, 'OBS_MEDIA_STATE_PLAYING');
-assert.equal(fake.mediaCursor, 12000);
+assert.equal(fake.mediaCursor, 8400);
+
+fake.calls.length = 0;
+fake.mediaState = 'OBS_MEDIA_STATE_PAUSED';
+fake.mediaCursor = 8400;
+fake.resetOnNextPlay = true;
+const resumedAfterDeferredReset = await server.handle({
+  jsonrpc: '2.0',
+  id: 411,
+  method: 'tools/call',
+  params: { name: 'media_control', arguments: { mediaId: 'media-1', action: 'play' } },
+});
+assert.equal(resumedAfterDeferredReset.result.isError, false, JSON.stringify(resumedAfterDeferredReset.result.structuredContent));
+assert.equal(fake.mediaState, 'OBS_MEDIA_STATE_PLAYING');
+assert.equal(fake.mediaCursor, 8400);
+assert(fake.calls.some((entry) => entry.requestType === 'SetMediaInputCursor' && entry.requestData.mediaCursor === 8400));
 
 fake.calls.length = 0;
 const added = await server.handle({
@@ -584,6 +605,7 @@ class RangeFakeObs {
   calls = [];
   mediaState = 'OBS_MEDIA_STATE_PLAYING';
   mediaCursor = 900;
+  resetOnNextPlay = true;
 
   async call(requestType, requestData) {
     this.calls.push({ requestType, requestData });
@@ -597,7 +619,13 @@ class RangeFakeObs {
     }
     if (requestType === 'TriggerMediaInputAction') {
       if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE') this.mediaState = 'OBS_MEDIA_STATE_PAUSED';
-      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY') this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+      if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY') {
+        this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
+        if (this.resetOnNextPlay) {
+          this.mediaCursor = 0;
+          this.resetOnNextPlay = false;
+        }
+      }
       if (requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART') {
         this.mediaState = 'OBS_MEDIA_STATE_PLAYING';
         this.mediaCursor = 0;
@@ -621,11 +649,13 @@ class RangeFakeObs {
 
 const rangeFake = new RangeFakeObs();
 const ranges = new RangePlaybackManager(rangeFake);
-await ranges.start({ mediaId: 'range-media', startMs: 500, endMs: 1000, pollIntervalMs: 25 });
+await ranges.start({ mediaId: 'range-media', startMs: 5000, endMs: 6000, pollIntervalMs: 25 });
 await new Promise((resolve) => setTimeout(resolve, 90));
 assert.equal(ranges.get('range-media'), null);
 assert(rangeFake.calls.some((entry) => entry.requestType === 'TriggerMediaInputAction' && entry.requestData.mediaAction === 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE'));
-assert(rangeFake.calls.some((entry) => entry.requestType === 'SetMediaInputCursor' && entry.requestData.mediaCursor === 1000));
+assert(rangeFake.calls.filter((entry) => entry.requestType === 'SetMediaInputCursor' && entry.requestData.mediaCursor === 5000).length >= 2);
+assert(!rangeFake.calls.some((entry) => entry.requestType === 'SetMediaInputCursor' && entry.requestData.mediaCursor === 6000));
+assert(rangeFake.mediaCursor >= 6000 && rangeFake.mediaCursor < 6500);
 ranges.close();
 
 const originalWebSocket = globalThis.WebSocket;
